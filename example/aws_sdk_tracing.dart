@@ -110,8 +110,10 @@ void main() async {
       //   return original.copyWith(httpSend: wrapSend(inner));
       final inner = (req) => original.getItem(req as _GetItemRequest);
       final wrapped = wrapSend(inner);
+      // wrapSend returns XRayHttpSendFn (Future<Object> Function(Object));
+      // cast back to the concrete send type expected by copyWith.
       return original.copyWith(
-        httpSend: wrapped,
+        httpSend: (req) async => await wrapped(req) as _GetItemResponse,
       );
     },
   );
