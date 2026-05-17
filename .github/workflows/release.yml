@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write  # create GitHub Release
+  id-token: write  # pub.dev OIDC publishing
+
+jobs:
+  release:
+    name: Release & publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      # ── Guard: tag must match pubspec version ────────────────────────────
+      - name: Verify tag matches pubspec version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PUBSPEC=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          if [ "$TAG" != "$PUBSPEC" ]; then
+            echo "Tag $TAG does not match pubspec version $PUBSPEC"
+            exit 1
+          fi
+          echo "Version: $TAG"
+
+      # ── CI checks ────────────────────────────────────────────────────────
+      - name: Verify formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze
+        run: dart analyze --fatal-warnings
+
+      - name: Run tests
+        run: dart test --reporter=github
+
+      # ── Extract release notes from CHANGELOG.md ──────────────────────────
+      - name: Extract changelog section
+        id: changelog
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Extract the block between this version header and the next
+          NOTES=$(awk "/^## $VERSION/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="See CHANGELOG.md for details."
+          fi
+          # Write to a temp file to preserve newlines
+          echo "$NOTES" > /tmp/release_notes.md
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # ── Dry run before publishing ─────────────────────────────────────────
+      - name: Publish dry run
+        run: dart pub publish --dry-run
+
+      # ── Create GitHub Release ─────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/release_notes.md
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+
+      # ── Publish to pub.dev ────────────────────────────────────────────────
+      # Requires automated publishing to be enabled in pub.dev package settings:
+      # https://pub.dev/packages/aws_xray_sdk/admin
+      # Set: Repository = mohamed-abdelsamei/aws-xray-sdk-dart
+      #      Workflow   = release.yml
+      #      Tag pattern = v*
+      - name: Publish to pub.dev
+        run: dart pub publish --force

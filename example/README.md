@@ -8,7 +8,7 @@ with `dart run` from the `aws_xray_sdk_dart/` directory.
 ```bash
 cd aws_xray_sdk_dart
 dart pub get
-dart run examples/basic_usage.dart
+dart run example/basic_usage.dart
 ```
 
 All examples use `NoopSender` by default — they print to stdout and exit
@@ -30,7 +30,7 @@ The minimal end-to-end path: create a tracer, create a segment, run a traced
 block, confirm the segment is closed.
 
 ```bash
-dart run examples/basic_usage.dart
+dart run example/basic_usage.dart
 ```
 
 ### 2. [http_tracing.dart](http_tracing.dart)
@@ -49,7 +49,7 @@ packages — is wrapped by `XRayHttpClient`, which:
 request.
 
 ```bash
-dart run examples/http_tracing.dart
+dart run example/http_tracing.dart
 ```
 
 ### 3. [aws_sdk_tracing.dart](aws_sdk_tracing.dart)
@@ -71,7 +71,7 @@ pub.dev), skip `registerClient` entirely — `XRay.patchHttp()` already traces
 every request to `*.amazonaws.com` with `namespace='aws'`.
 
 ```bash
-dart run examples/aws_sdk_tracing.dart
+dart run example/aws_sdk_tracing.dart
 ```
 
 ### 4. [advanced_tracing.dart](advanced_tracing.dart)
@@ -86,7 +86,7 @@ the final segment document.  The SDK does not automatically nest them; nesting
 in the X-Ray timeline is driven by `start_time` / `end_time` overlap.
 
 ```bash
-dart run examples/advanced_tracing.dart
+dart run example/advanced_tracing.dart
 ```
 
 ### 5. [sampling_strategies.dart](sampling_strategies.dart)
@@ -96,7 +96,7 @@ decision is made once at `tracer.run()` entry and propagated to all child
 subsegments via the Zone.
 
 ```bash
-dart run examples/sampling_strategies.dart
+dart run example/sampling_strategies.dart
 ```
 
 ### 6. [error_handling.dart](error_handling.dart)
@@ -111,7 +111,7 @@ How the SDK records errors, faults, and throttle responses:
 | Unhandled exception | `fault = true`, `cause` object |
 
 ```bash
-dart run examples/error_handling.dart
+dart run example/error_handling.dart
 ```
 
 ### 7. [server_middleware.dart](server_middleware.dart)
@@ -122,7 +122,7 @@ top-level segment for each incoming request, run the handler inside
 `X-Amzn-Trace-Id` header — the standard entry-point pattern for HTTP servers.
 
 ```bash
-dart run examples/server_middleware.dart
+dart run example/server_middleware.dart
 ```
 
 ### 8. [manual_instrumentation.dart](manual_instrumentation.dart)
@@ -132,7 +132,7 @@ subsegments (`SqlData`), and custom sampling — without any AWS SDK client
 involved.  Useful when wrapping a database driver or internal library.
 
 ```bash
-dart run examples/manual_instrumentation.dart
+dart run example/manual_instrumentation.dart
 ```
 
 ### 9. [lambda_runtime.dart](lambda_runtime.dart)
@@ -167,7 +167,7 @@ AWS::Lambda (facade)                    [auto]
 ```
 
 ```bash
-dart run examples/lambda_runtime.dart
+dart run example/lambda_runtime.dart
 ```
 
 ---
