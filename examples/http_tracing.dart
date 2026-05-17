@@ -1,35 +1,72 @@
+// Example: automatic HTTP tracing via XRay.patchHttp().
+//
+// After a single patchHttp() call every HttpClient opened in the process
+// (including inside third-party packages that use package:http's IOClient)
+// is wrapped by XRayHttpClient, which:
+//   - opens a subsegment named by the request host
+//   - injects X-Amzn-Trace-Id into the outbound request
+//   - records HTTP method, URL, and response status
+//   - marks the subsegment as fault/error when the request fails
+//
+// namespace is 'remote' for general hosts, 'aws' for *.amazonaws.com hosts.
+
 import 'dart:io';
+
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 
 void main() async {
   final tracer = XRayTracer(
-    serviceName: 'http-client-service',
-    sender: NoopSender(),
+    serviceName: 'http-demo',
+    sender: NoopSender(), // swap for UdpSender() to see traces in X-Ray
     sampling: FixedRateSampler(1.0),
   );
 
-  // Patch dart:io globally — every HttpClient.openUrl() call is now traced.
+  // Patch dart:io ONCE at startup.
+  // Call this before creating any HttpClient — patching affects all clients
+  // constructed after this point.  Do not call twice; double-patching wraps
+  // XRayHttpClient inside itself and produces duplicate subsegments.
   XRay.patchHttp(tracer);
 
   final segment = Segment.begin(
-    name: 'http-request',
+    name: 'http-demo',
     traceId: TraceId.generate(),
   );
 
   await tracer.run(segment, () async {
-    print('Making HTTP request — trace: ${segment.traceId}');
+    print('Trace: ${segment.traceId}');
 
-    // XRayHttpClient intercepts this automatically.
-    final uri = Uri.parse('https://httpbin.org/get');
-    final request = await HttpClient().getUrl(uri);
-    final response = await request.close();
-    await response.drain<void>();
+    // ── Request 1: successful GET ─────────────────────────────────────────
+    // XRayHttpClient intercepts getUrl, opens subsegment 'jsonplaceholder.typicode.com'
+    // (namespace='remote'), then closes it with status=200 on response.
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(
+        Uri.parse('https://jsonplaceholder.typicode.com/users/1'),
+      );
+      final res = await req.close();
+      await res.drain<void>();
+      print('GET /users/1 → ${res.statusCode}');
+    } finally {
+      client.close();
+    }
 
-    print('Response status: ${response.statusCode}');
+    // ── Request 2: 404 ────────────────────────────────────────────────────
+    // The subsegment is marked error=true (4xx) automatically.
+    final client2 = HttpClient();
+    try {
+      final req = await client2.getUrl(
+        Uri.parse('https://jsonplaceholder.typicode.com/users/999'),
+      );
+      final res = await req.close();
+      await res.drain<void>();
+      print('GET /users/999 → ${res.statusCode}');
+    } finally {
+      client2.close();
+    }
   });
 
-  // Remove the global patch when done (e.g. in tests).
+  // Restore previous overrides (important in tests to avoid cross-test leakage).
   XRay.unpatchHttp();
 
-  print('Segment with HTTP subsegments sent to X-Ray daemon');
+  print('Done — segment contains HTTP subsegments for both requests');
 }
