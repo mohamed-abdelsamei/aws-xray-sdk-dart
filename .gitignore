@@ -1,0 +1,28 @@
+# Dart / Pub
+.dart_tool/
+.packages
+pubspec.lock
+build/
+doc/api/
+
+# Dart build_runner output
+*.g.dart
+*.freezed.dart
+*.mocks.dart
+
+# Coverage
+coverage/
+lcov.info
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# macOS
+.DS_Store
+
+# Test cache
+.test_results/

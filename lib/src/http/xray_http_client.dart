@@ -1,0 +1,291 @@
+import 'dart:convert' show Encoding;
+import 'dart:io';
+import '../models/http_data.dart';
+import '../models/subsegment.dart';
+import '../tracer.dart';
+import '../wrappers/xray_interceptor.dart' show buildTraceHeader;
+
+const _awsDomainSuffix = '.amazonaws.com';
+
+/// Wraps a `dart:io` [HttpClient] to trace every outbound HTTP request.
+///
+/// For each request:
+/// - opens a subsegment named by the request host
+/// - injects the `X-Amzn-Trace-Id` header
+/// - records response status and closes the subsegment on completion
+final class XRayHttpClient implements HttpClient {
+  XRayHttpClient(this._inner, this._tracer);
+
+  final HttpClient _inner;
+  final XRayTracer _tracer;
+
+  @override
+  Future<HttpClientRequest> openUrl(String method, Uri url) async {
+    final segment = _tracer.currentSegment;
+    if (segment == null) return _inner.openUrl(method, url);
+
+    final namespace = url.host.endsWith(_awsDomainSuffix) ? 'aws' : 'remote';
+    final sub = _tracer.beginSubsegment(url.host, namespace: namespace);
+
+    try {
+      final innerRequest = await _inner.openUrl(method, url);
+      innerRequest.headers.add(
+        'X-Amzn-Trace-Id',
+        buildTraceHeader(
+          traceId: segment.traceId.toString(),
+          segmentId: sub.id,
+          sampled: _tracer.isSampled,
+        ),
+      );
+      // Intercept the response by wrapping close().
+      return _TracedRequest(innerRequest, sub, _tracer, method, url);
+    } catch (e) {
+      // Connection failed (DNS, refused, timeout…) — record the attempt and
+      // close the subsegment as faulted so it still appears in X-Ray traces.
+      _tracer.failSubsegment(
+        sub.withHttp(HttpData(
+          request: HttpRequestData(method: method, url: url.toString()),
+        )),
+        e,
+      );
+      rethrow;
+    }
+  }
+
+  // ---- Delegate all other HttpClient members to _inner ----
+
+  @override
+  bool get autoUncompress => _inner.autoUncompress;
+  @override
+  set autoUncompress(bool v) => _inner.autoUncompress = v;
+
+  @override
+  Duration? get connectionTimeout => _inner.connectionTimeout;
+  @override
+  set connectionTimeout(Duration? v) => _inner.connectionTimeout = v;
+
+  @override
+  Duration get idleTimeout => _inner.idleTimeout;
+  @override
+  set idleTimeout(Duration v) => _inner.idleTimeout = v;
+
+  @override
+  int? get maxConnectionsPerHost => _inner.maxConnectionsPerHost;
+  @override
+  set maxConnectionsPerHost(int? v) => _inner.maxConnectionsPerHost = v;
+
+  @override
+  String? get userAgent => _inner.userAgent;
+  @override
+  set userAgent(String? v) => _inner.userAgent = v;
+
+  @override
+  void addCredentials(Uri url, String realm, HttpClientCredentials creds) =>
+      _inner.addCredentials(url, realm, creds);
+
+  @override
+  void addProxyCredentials(
+    String host,
+    int port,
+    String realm,
+    HttpClientCredentials creds,
+  ) =>
+      _inner.addProxyCredentials(host, port, realm, creds);
+
+  @override
+  set authenticate(
+    Future<bool> Function(Uri url, String scheme, String? realm)? f,
+  ) =>
+      _inner.authenticate = f;
+
+  @override
+  set authenticateProxy(
+    Future<bool> Function(
+      String host,
+      int port,
+      String scheme,
+      String? realm,
+    )? f,
+  ) =>
+      _inner.authenticateProxy = f;
+
+  @override
+  set badCertificateCallback(
+    bool Function(X509Certificate cert, String host, int port)? cb,
+  ) =>
+      _inner.badCertificateCallback = cb;
+
+  @override
+  set findProxy(String Function(Uri url)? f) => _inner.findProxy = f;
+
+  @override
+  Future<HttpClientRequest> open(
+    String method,
+    String host,
+    int port,
+    String path,
+  ) =>
+      openUrl(method, Uri(scheme: 'https', host: host, port: port, path: path));
+
+  @override
+  Future<HttpClientRequest> delete(String host, int port, String path) =>
+      openUrl(
+          'DELETE', Uri(scheme: 'https', host: host, port: port, path: path));
+
+  @override
+  Future<HttpClientRequest> deleteUrl(Uri url) => openUrl('DELETE', url);
+
+  @override
+  Future<HttpClientRequest> get(String host, int port, String path) =>
+      openUrl('GET', Uri(scheme: 'https', host: host, port: port, path: path));
+
+  @override
+  Future<HttpClientRequest> getUrl(Uri url) => openUrl('GET', url);
+
+  @override
+  Future<HttpClientRequest> head(String host, int port, String path) =>
+      openUrl('HEAD', Uri(scheme: 'https', host: host, port: port, path: path));
+
+  @override
+  Future<HttpClientRequest> headUrl(Uri url) => openUrl('HEAD', url);
+
+  @override
+  Future<HttpClientRequest> patch(String host, int port, String path) =>
+      openUrl(
+          'PATCH', Uri(scheme: 'https', host: host, port: port, path: path));
+
+  @override
+  Future<HttpClientRequest> patchUrl(Uri url) => openUrl('PATCH', url);
+
+  @override
+  Future<HttpClientRequest> post(String host, int port, String path) =>
+      openUrl('POST', Uri(scheme: 'https', host: host, port: port, path: path));
+
+  @override
+  Future<HttpClientRequest> postUrl(Uri url) => openUrl('POST', url);
+
+  @override
+  Future<HttpClientRequest> put(String host, int port, String path) =>
+      openUrl('PUT', Uri(scheme: 'https', host: host, port: port, path: path));
+
+  @override
+  Future<HttpClientRequest> putUrl(Uri url) => openUrl('PUT', url);
+
+  @override
+  void close({bool force = false}) => _inner.close(force: force);
+
+  @override
+  set connectionFactory(
+    Future<ConnectionTask<Socket>> Function(
+      Uri url,
+      String? proxyHost,
+      int? proxyPort,
+    )? f,
+  ) =>
+      _inner.connectionFactory = f;
+
+  @override
+  set keyLog(Function(String line)? f) => _inner.keyLog = f;
+}
+
+/// Wraps [HttpClientRequest] to intercept [close] and record the response.
+final class _TracedRequest implements HttpClientRequest {
+  _TracedRequest(
+    this._inner,
+    this._sub,
+    this._tracer,
+    this._method,
+    this._url,
+  );
+
+  final HttpClientRequest _inner;
+  Subsegment _sub;
+  final XRayTracer _tracer;
+  final String _method;
+  final Uri _url;
+
+  @override
+  Future<HttpClientResponse> close() async {
+    try {
+      final response = await _inner.close();
+
+      _sub = _sub
+          .withHttp(HttpData(
+            request: HttpRequestData(method: _method, url: _url.toString()),
+            response: HttpResponseData(status: response.statusCode),
+          ))
+          .applyStatus(response.statusCode);
+
+      _tracer.endSubsegment(_sub);
+      return response;
+    } catch (e) {
+      // Request was sent but the response could not be read (reset, timeout…).
+      // Record what we know and mark the subsegment as faulted.
+      _tracer.failSubsegment(
+        _sub.withHttp(HttpData(
+          request: HttpRequestData(method: _method, url: _url.toString()),
+        )),
+        e,
+      );
+      rethrow;
+    }
+  }
+
+  // Delegate everything else.
+  @override
+  HttpConnectionInfo? get connectionInfo => _inner.connectionInfo;
+  @override
+  List<Cookie> get cookies => _inner.cookies;
+  @override
+  Future<HttpClientResponse> get done => _inner.done;
+  @override
+  Encoding get encoding => _inner.encoding;
+  @override
+  set encoding(Encoding e) => _inner.encoding = e;
+  @override
+  HttpHeaders get headers => _inner.headers;
+  @override
+  String get method => _inner.method;
+  @override
+  Uri get uri => _inner.uri;
+  @override
+  void abort([Object? exception, StackTrace? stackTrace]) =>
+      _inner.abort(exception, stackTrace);
+  @override
+  void add(List<int> data) => _inner.add(data);
+  @override
+  void addError(Object error, [StackTrace? st]) => _inner.addError(error, st);
+  @override
+  Future<void> addStream(Stream<List<int>> stream) => _inner.addStream(stream);
+  @override
+  Future<void> flush() => _inner.flush();
+  @override
+  void write(Object? obj) => _inner.write(obj);
+  @override
+  void writeAll(Iterable<Object?> objects, [String separator = '']) =>
+      _inner.writeAll(objects, separator);
+  @override
+  void writeCharCode(int charCode) => _inner.writeCharCode(charCode);
+  @override
+  void writeln([Object? obj = '']) => _inner.writeln(obj);
+  @override
+  bool get bufferOutput => _inner.bufferOutput;
+  @override
+  set bufferOutput(bool v) => _inner.bufferOutput = v;
+  @override
+  int get contentLength => _inner.contentLength;
+  @override
+  set contentLength(int v) => _inner.contentLength = v;
+  @override
+  bool get followRedirects => _inner.followRedirects;
+  @override
+  set followRedirects(bool v) => _inner.followRedirects = v;
+  @override
+  int get maxRedirects => _inner.maxRedirects;
+  @override
+  set maxRedirects(int v) => _inner.maxRedirects = v;
+  @override
+  bool get persistentConnection => _inner.persistentConnection;
+  @override
+  set persistentConnection(bool v) => _inner.persistentConnection = v;
+}

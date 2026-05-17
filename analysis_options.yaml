@@ -1,0 +1,9 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  errors:
+    # Treat all warnings as errors in CI.
+    dead_code: error
+    missing_return: error
+    unused_import: error
+    unused_local_variable: error
