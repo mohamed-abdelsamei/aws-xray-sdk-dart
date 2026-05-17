@@ -48,10 +48,14 @@ import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 /// Lambda injects this env var.  The format is `host:port`.
 /// Falls back to 127.0.0.1:2000 when running outside Lambda.
 (String host, int port) _daemonAddress() {
-  final raw = Platform.environment['AWS_XRAY_DAEMON_ADDRESS'] ?? '127.0.0.1:2000';
+  final raw =
+      Platform.environment['AWS_XRAY_DAEMON_ADDRESS'] ?? '127.0.0.1:2000';
   final colon = raw.lastIndexOf(':');
   if (colon == -1) return (raw, 2000);
-  return (raw.substring(0, colon), int.tryParse(raw.substring(colon + 1)) ?? 2000);
+  return (
+    raw.substring(0, colon),
+    int.tryParse(raw.substring(colon + 1)) ?? 2000
+  );
 }
 
 // ── Cold start ────────────────────────────────────────────────────────────────
@@ -62,7 +66,8 @@ Future<void> main() async {
   // 1. Initialise the X-Ray tracer with the correct daemon address.
   final (host, port) = _daemonAddress();
   final tracer = XRayTracer(
-    serviceName: Platform.environment['AWS_LAMBDA_FUNCTION_NAME'] ?? 'my-function',
+    serviceName:
+        Platform.environment['AWS_LAMBDA_FUNCTION_NAME'] ?? 'my-function',
     sender: UdpSender(host: host, port: port),
     // Lambda has already decided sampling (Sampled= in the trace header).
     // Always forward to the local daemon at rate 1.0; the daemon enforces it.
@@ -81,18 +86,19 @@ Future<void> main() async {
 
   while (true) {
     // ── Poll for next invocation ────────────────────────────────────────────
-    final nextReq = await client
-        .getUrl(Uri.parse('http://$runtimeApi/2018-06-01/runtime/invocation/next'));
+    final nextReq = await client.getUrl(
+        Uri.parse('http://$runtimeApi/2018-06-01/runtime/invocation/next'));
     final nextRes = await nextReq.close();
 
-    final requestId = nextRes.headers.value('lambda-runtime-aws-request-id') ?? '';
+    final requestId =
+        nextRes.headers.value('lambda-runtime-aws-request-id') ?? '';
     final rawHeader = nextRes.headers.value('lambda-runtime-trace-id') ?? '';
     // deadlineMs available for timeout enforcement if needed:
     // int.tryParse(nextRes.headers.value('lambda-runtime-deadline-ms') ?? '')
 
     final event =
         jsonDecode(await utf8.decodeStream(nextRes)) as Map<String, Object?>? ??
-        const {};
+            const {};
 
     stderr.writeln('[invoke] requestId=$requestId traceHeader=$rawHeader');
 
@@ -100,9 +106,9 @@ Future<void> main() async {
     // Root=   → the X-Ray trace ID for this invocation
     // Parent= → the id of the auto-created AWS::Lambda::Function segment
     // Sampled=1/0 → Lambda's sampling decision
-    final traceId  = TraceId.tryParse(rawHeader) ?? TraceId.generate();
+    final traceId = TraceId.tryParse(rawHeader) ?? TraceId.generate();
     final parentId = TraceId.parseParentId(rawHeader);
-    final sampled  = TraceId.parseSampled(rawHeader) ?? true;
+    final sampled = TraceId.parseSampled(rawHeader) ?? true;
 
     // ── Handle + trace ──────────────────────────────────────────────────────
     try {
@@ -193,21 +199,22 @@ Future<Map<String, Object?>> _handleEvent(
   // If the host were *.amazonaws.com the namespace would be 'aws' automatically.
   final httpClient = HttpClient();
   try {
-    final uri = Uri.parse(
-        'https://jsonplaceholder.typicode.com/users/$userId');
-    final req  = await httpClient.getUrl(uri);
-    final res  = await req.close();
+    final uri = Uri.parse('https://jsonplaceholder.typicode.com/users/$userId');
+    final req = await httpClient.getUrl(uri);
+    final res = await req.close();
     if (res.statusCode == 404) {
       return _apiResponse(404, body: {'error': 'user $userId not found'});
     }
-    final body = jsonDecode(await utf8.decodeStream(res)) as Map<String, Object?>;
+    final body =
+        jsonDecode(await utf8.decodeStream(res)) as Map<String, Object?>;
     return _apiResponse(200, body: body);
   } finally {
     httpClient.close();
   }
 }
 
-Map<String, Object?> _apiResponse(int status, {required Map<String, Object?> body}) =>
+Map<String, Object?> _apiResponse(int status,
+        {required Map<String, Object?> body}) =>
     {
       'statusCode': status,
       'headers': {'Content-Type': 'application/json'},

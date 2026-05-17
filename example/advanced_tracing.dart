@@ -46,7 +46,8 @@ void main() async {
 
     // ── 2. Check inventory (simulated AWS call) ───────────────────────────
     // namespace='aws' marks this as an AWS service call in the service map.
-    final inventorySub = tracer.beginSubsegment('inventory-check', namespace: 'aws');
+    final inventorySub =
+        tracer.beginSubsegment('inventory-check', namespace: 'aws');
     try {
       await Future.delayed(const Duration(milliseconds: 30));
       tracer.endSubsegment(inventorySub);
@@ -58,7 +59,8 @@ void main() async {
 
     // ── 3. Charge payment gateway (remote call) ───────────────────────────
     // namespace='remote' marks this as an external HTTP call.
-    final paymentSub = tracer.beginSubsegment('charge-payment', namespace: 'remote');
+    final paymentSub =
+        tracer.beginSubsegment('charge-payment', namespace: 'remote');
     try {
       await Future.delayed(const Duration(milliseconds: 80));
       tracer.endSubsegment(paymentSub);

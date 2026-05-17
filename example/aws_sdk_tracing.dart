@@ -39,7 +39,9 @@ class _GetItemResponse {
 /// Real Smithy clients have an internal `httpSend` that this SDK intercepts
 /// via the `rebuild` callback in [XRay.registerClient].
 class StubDynamoDbClient {
-  StubDynamoDbClient({required this.region, _SendFn<_GetItemRequest, _GetItemResponse>? httpSend})
+  StubDynamoDbClient(
+      {required this.region,
+      _SendFn<_GetItemRequest, _GetItemResponse>? httpSend})
       : _send = httpSend ?? _defaultSend;
 
   final String region;
@@ -49,7 +51,8 @@ class StubDynamoDbClient {
 
   /// Returns a copy with a different internal send function — mirrors the
   /// real Smithy client's `copyWith(httpSend: ...)` pattern.
-  StubDynamoDbClient copyWith({_SendFn<_GetItemRequest, _GetItemResponse>? httpSend}) =>
+  StubDynamoDbClient copyWith(
+          {_SendFn<_GetItemRequest, _GetItemResponse>? httpSend}) =>
       StubDynamoDbClient(region: region, httpSend: httpSend);
 
   static Future<_GetItemResponse> _defaultSend(_GetItemRequest req) async {

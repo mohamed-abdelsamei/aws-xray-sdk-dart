@@ -152,7 +152,8 @@ final class XRayTracer {
             traceId.toString(),
           );
           // Debug: log exactly what we're about to send to the daemon.
-          stderr.writeln('[XRay runLambda] sampled=$sampled packet=${packet.length}B '
+          stderr.writeln(
+              '[XRay runLambda] sampled=$sampled packet=${packet.length}B '
               'content=${utf8.decode(packet)}');
           if (sampled) {
             try {

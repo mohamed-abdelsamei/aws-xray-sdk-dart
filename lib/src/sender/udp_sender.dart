@@ -40,11 +40,15 @@ final class UdpSender extends Sender {
     final address = (await InternetAddress.lookup(host)).first;
     final socket = await _getSocket(address);
 
-    dev.log('aws_xray_sdk: sendPackets ${packets.length} packet(s) → $host:$port', name: 'XRay');
+    dev.log(
+        'aws_xray_sdk: sendPackets ${packets.length} packet(s) → $host:$port',
+        name: 'XRay');
     for (final (i, payload) in packets.indexed) {
       try {
         final sent = socket.send(payload, address, port);
-        dev.log('aws_xray_sdk: packet[$i] ${payload.length}B → sent=$sent bytes', name: 'XRay');
+        dev.log(
+            'aws_xray_sdk: packet[$i] ${payload.length}B → sent=$sent bytes',
+            name: 'XRay');
       } catch (e) {
         dev.log('aws_xray_sdk: packet[$i] UDP send failed: $e', name: 'XRay');
       }
