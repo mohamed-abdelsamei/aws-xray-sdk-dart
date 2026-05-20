@@ -167,6 +167,23 @@ AWS::Lambda (facade)                [auto]
       api.downstream.com            ← auto HTTP, namespace=remote
 ```
 
+### Trace header source
+
+Always read the trace context from the `Lambda-Runtime-Trace-Id` **HTTP
+response header** returned by the Runtime API's `/invocation/next` call —
+not from `_X_AMZN_TRACE_ID` (the process environment variable).
+
+Lambda sets both per invocation, but they often carry **different trace IDs**:
+the env var reflects the incoming request trace (e.g. from API Gateway), while
+the header carries the function-level trace ID that Lambda's auto-created
+`AWS::Lambda::Function` segment uses. Reading from the env var causes your
+subsegment document to land in a separate, unlinked trace.
+
+```
+❌  Platform.environment['_X_AMZN_TRACE_ID']  // incoming request trace ID
+✅  nextRes.headers.value('lambda-runtime-trace-id')  // function-level trace ID
+```
+
 ### Daemon address
 
 Lambda injects the daemon address via `AWS_XRAY_DAEMON_ADDRESS`. Do **not**
@@ -186,6 +203,87 @@ final tracer = XRayTracer(
   sampling: FixedRateSampler(1.0),  // Lambda decides sampling; always forward to daemon
 );
 ```
+
+### Using `aws_lambda_dart_runtime_ns`
+
+If you use the [`aws_lambda_dart_runtime_ns`](https://pub.dev/packages/aws_lambda_dart_runtime_ns)
+community package (Dart 3, actively maintained), the runtime controls the event
+loop and uses `package:http` internally. Wrap the runtime loop with
+`invokeWithXRay()` to intercept the `Lambda-Runtime-Trace-Id` header, and wrap
+each handler with `xRayHandler()`:
+
+```dart
+// main.dart
+void main() async {
+  final tracer = _setupTracer();
+  XRay.patchHttp(tracer);  // must be before any HttpClient is created
+
+  await invokeWithXRay(() => invokeAwsLambdaRuntime([
+    xRayHandler(name: 'fn.handler', tracer: tracer, action: handleEvent),
+  ]));
+}
+
+// xray_handler.dart — minimal integration shim
+String _lambdaTraceHeader = '';
+
+http.Client _capturingClient() => _TraceCapturingClient(http.Client());
+
+class _TraceCapturingClient extends http.BaseClient {
+  final http.Client _inner;
+  _TraceCapturingClient(this._inner);
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final res = await _inner.send(request);
+    final h = res.headers['lambda-runtime-trace-id'];
+    if (h != null && h.isNotEmpty) _lambdaTraceHeader = h;
+    return res;
+  }
+}
+
+Future<void> invokeWithXRay(Future<void> Function() fn) =>
+    http.runWithClient(fn, _capturingClient);
+
+FunctionHandler xRayHandler({
+  required String name,
+  required XRayTracer tracer,
+  required FunctionAction action,
+}) =>
+    FunctionHandler(
+      name: name,
+      action: (ctx, event) => _traced(tracer, ctx, () => action(ctx, event)),
+    );
+
+Future<InvocationResult> _traced(
+  XRayTracer tracer,
+  RuntimeContext ctx,
+  Future<InvocationResult> Function() fn,
+) {
+  final raw = _lambdaTraceHeader;
+  final traceId = TraceId.tryParse(raw) ?? TraceId.generate();
+  final parentId = TraceId.parseParentId(raw);
+  final sampled = TraceId.parseSampled(raw) ?? true;
+  if (parentId != null) {
+    return tracer.runLambda(traceId, parentId, ctx.functionName, fn,
+        sampled: sampled);
+  }
+  // Local dev / no runtime present
+  final segment = Segment.begin(name: ctx.functionName, traceId: traceId);
+  return tracer.run(segment, fn);
+}
+```
+
+`invokeWithXRay` wraps the runtime's `package:http` calls so every
+`/invocation/next` response is seen by `_TraceCapturingClient`, which stores
+the authoritative `Lambda-Runtime-Trace-Id` header. `xRayHandler` reads that
+stored value (always set before the handler fires) instead of the env var.
+
+### Complete Lambda examples
+
+See the workspace demos for fully deployable CDK applications:
+
+- [`demos/lambda/`](../demos/lambda/) — hand-rolled runtime, reads trace header directly from HTTP responses
+- [`demos/lambda_dart_runtime/`](../demos/lambda_dart_runtime/) — `aws_lambda_dart_runtime_ns` package, header captured via `http.runWithClient()`
 
 ---
 
