@@ -6,14 +6,21 @@ import 'sampling_strategy.dart';
 ///
 /// The reservoir resets each calendar second, matching the X-Ray daemon
 /// reservoir algorithm.
+///
+/// **Isolate safety:** [_currentSecond] and [_takenThisSecond] are mutable
+/// instance state. Each Dart isolate must create its own [ReservoirSampler]
+/// (and its own [XRayTracer]); sharing an instance across isolates is not
+/// supported and will produce incorrect sampling counts.
 final class ReservoirSampler implements SamplingStrategy {
   ReservoirSampler({
     this.reservoirSize = 50,
     this.fixedRate = 0.05,
-  });
+    DateTime Function()? now,
+  }) : _now = now ?? DateTime.now;
 
   final int reservoirSize;
   final double fixedRate;
+  final DateTime Function() _now;
 
   static final _rng = Random.secure();
 
@@ -22,7 +29,7 @@ final class ReservoirSampler implements SamplingStrategy {
 
   @override
   bool shouldSample(SamplingRequest request) {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final now = _now().millisecondsSinceEpoch ~/ 1000;
     if (now != _currentSecond) {
       _currentSecond = now;
       _takenThisSecond = 0;

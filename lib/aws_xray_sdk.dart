@@ -18,7 +18,7 @@
 ///   final result = await ddb.getItem(...);
 /// });
 /// ```
-library aws_xray_sdk;
+library;
 
 // Core
 export 'src/tracer.dart';
@@ -36,7 +36,8 @@ export 'src/models/cause.dart';
 // Sender
 export 'src/sender/sender.dart';
 export 'src/sender/udp_sender.dart';
-export 'src/sender/http_api_sender.dart';
+// HttpApiSender is not exported — SigV4 signing is not yet implemented.
+// Use UdpSender for all deployments.
 export 'src/sender/noop_sender.dart';
 
 // Sampling
@@ -52,3 +53,9 @@ export 'src/wrappers/xray_interceptor.dart'
 // HTTP patch
 export 'src/http/xray_http_client.dart';
 export 'src/http/xray_http_overrides.dart';
+
+// HTTP client (package:http)
+export 'src/http/xray_base_client.dart';
+
+// Server middleware
+export 'src/http/xray_server_middleware.dart';

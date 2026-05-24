@@ -1,13 +1,15 @@
-// Example: server-side request tracing middleware pattern.
+// Example: server-side request tracing using handleTraced().
 //
-// Shows how to create a top-level segment for each incoming request,
-// run the handler inside tracer.run(), and propagate the trace context
-// from an upstream X-Amzn-Trace-Id header.
+// Shows how to trace incoming HTTP requests with a single call to
+// XRayServerMiddleware.handleTraced().  It parses the incoming
+// X-Amzn-Trace-Id header, creates a segment, runs the handler inside
+// tracer.run(), and sets the response header with the new trace context.
 //
 // This example uses plain dart:io HttpServer — the same pattern applies
 // to any Dart web framework (shelf, angel3, etc.).
 
 import 'dart:io';
+
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 
 final _tracer = XRayTracer(
@@ -24,30 +26,15 @@ Future<void> main() async {
   print('Listening on http://localhost:8080');
 
   await for (final request in server) {
-    _handleRequest(request); // fire-and-forget per request
+    _handleRequest(request);
   }
 }
 
 Future<void> _handleRequest(HttpRequest request) async {
-  // Parse incoming trace context so we can continue the upstream trace.
-  final upstreamHeader = request.headers.value('x-amzn-trace-id') ?? '';
-  final upstreamTraceId = TraceId.tryParse(upstreamHeader);
-  final parentId = TraceId.parseParentId(upstreamHeader);
-
-  final segment = Segment.begin(
-    name: 'my-api',
-    traceId: upstreamTraceId ?? TraceId.generate(),
-    parentId: parentId,
-  );
-
-  try {
-    await _tracer.run(segment, () => _router(request));
-  } catch (e) {
-    request.response
-      ..statusCode = HttpStatus.internalServerError
-      ..write('Internal Server Error')
-      ..close();
-  }
+  // handleTraced wraps every request in its own segment.
+  // It parses X-Amzn-Trace-Id from the upstream caller, creates a segment,
+  // runs the handler inside tracer.run(), and sets the response header.
+  await handleTraced(request, _tracer, () => _router(request));
 }
 
 Future<void> _router(HttpRequest request) async {

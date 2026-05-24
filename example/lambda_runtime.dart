@@ -170,7 +170,7 @@ Future<void> main() async {
 /// The two subsegments produced here appear in X-Ray under the handler
 /// subsegment emitted by runLambda():
 ///
-///   <function-name>
+///   `function-name`
 ///     parse-input       ← manual subsegment
 ///     jsonplaceholder…  ← auto-traced HTTP, namespace=remote
 Future<Map<String, Object?>> _handleEvent(

@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 import 'models/segment.dart';
 import 'models/subsegment.dart';
 import 'models/trace_id.dart';
@@ -56,30 +54,20 @@ final class XRayTracer {
     String httpMethod = 'UNKNOWN',
     String urlPath = '/',
   }) {
-    // Make the sampling decision once, before any work begins.
     final sampled = _sampling.shouldSample(SamplingRequest(
       serviceName: serviceName,
       httpMethod: httpMethod,
       urlPath: urlPath,
     ));
 
-    // Mutable list accumulates subsegments added during this zone's lifetime.
-    final subs = <Subsegment>[];
-
-    return runZoned(
-      () async {
-        try {
-          return await fn();
-        } finally {
-          final closed = segment.close();
-          final withSubs = subs.fold(closed, (s, sub) => s.addSubsegment(sub));
-          await closeSegment(withSubs);
-        }
-      },
-      zoneValues: {
-        _zoneKey: segment,
-        _subsegmentsKey: subs,
-        _sampledKey: sampled,
+    return _runZoned(
+      segment,
+      fn,
+      sampled: sampled,
+      onComplete: (subs) async {
+        final closed = segment.close();
+        final withSubs = subs.fold(closed, (s, sub) => s.addSubsegment(sub));
+        await closeSegment(withSubs);
       },
     );
   }
@@ -116,7 +104,6 @@ final class XRayTracer {
     Future<T> Function() fn, {
     bool sampled = true,
   }) {
-    final subs = <Subsegment>[];
     final startMs = DateTime.now().millisecondsSinceEpoch;
 
     // A virtual segment is stored in the zone so that [currentSegment] is
@@ -129,46 +116,52 @@ final class XRayTracer {
       parentId: lambdaParentId,
     );
 
+    return _runZoned(
+      virtualSegment,
+      fn,
+      sampled: sampled,
+      onComplete: (subs) async {
+        final endMs = DateTime.now().millisecondsSinceEpoch;
+        final handlerDoc = <String, Object?>{
+          'name': name,
+          'id': virtualSegment.id,
+          'start_time': startMs / 1000.0,
+          'end_time': endMs / 1000.0,
+          if (subs.isNotEmpty)
+            'subsegments': subs.map((s) => s.toJson()).toList(),
+        };
+        final packet = encodeSubsegmentDoc(
+          handlerDoc,
+          lambdaParentId,
+          traceId.toString(),
+        );
+        if (sampled) await _sender.sendPackets([packet]);
+      },
+    );
+  }
+
+  /// Shared zone scaffolding for [run] and [runLambda].
+  ///
+  /// Stores [segment], a fresh subsegment list, and [sampled] in a new zone,
+  /// runs [fn], then calls [onComplete] with the accumulated subsegments in a
+  /// `finally` block so the span is always closed and delivered.
+  Future<T> _runZoned<T>(
+    Segment segment,
+    Future<T> Function() fn, {
+    required bool sampled,
+    required Future<void> Function(List<Subsegment> subs) onComplete,
+  }) {
+    final subs = <Subsegment>[];
     return runZoned(
       () async {
         try {
           return await fn();
         } finally {
-          final endMs = DateTime.now().millisecondsSinceEpoch;
-
-          // Build the handler subsegment JSON.
-          final handlerDoc = <String, Object?>{
-            'name': name,
-            'id': virtualSegment.id,
-            'start_time': startMs / 1000.0,
-            'end_time': endMs / 1000.0,
-            if (subs.isNotEmpty)
-              'subsegments': subs.map((s) => s.toJson()).toList(),
-          };
-
-          final packet = encodeSubsegmentDoc(
-            handlerDoc,
-            lambdaParentId,
-            traceId.toString(),
-          );
-          // Debug: log exactly what we're about to send to the daemon.
-          stderr.writeln(
-              '[XRay runLambda] sampled=$sampled packet=${packet.length}B '
-              'content=${utf8.decode(packet)}');
-          if (sampled) {
-            try {
-              await _sender.sendPackets([packet]);
-              stderr.writeln('[XRay runLambda] sendPackets completed OK');
-            } catch (e, st) {
-              stderr.writeln('[XRay runLambda] sendPackets ERROR: $e\n$st');
-            }
-          } else {
-            stderr.writeln('[XRay runLambda] not sampled — skipped');
-          }
+          await onComplete(subs);
         }
       },
       zoneValues: {
-        _zoneKey: virtualSegment,
+        _zoneKey: segment,
         _subsegmentsKey: subs,
         _sampledKey: sampled,
       },

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert' show Encoding;
 import 'dart:io';
 import '../models/http_data.dart';
@@ -216,8 +217,10 @@ final class _TracedRequest implements HttpClientRequest {
           ))
           .applyStatus(response.statusCode);
 
-      _tracer.endSubsegment(_sub);
-      return response;
+      // Wrap the response stream so the subsegment is closed only after the
+      // body is fully consumed. If the body stream errors (e.g. connection
+      // reset mid-read), the subsegment is marked as faulted.
+      return _TracedResponse(response, _sub, _tracer);
     } catch (e) {
       // Request was sent but the response could not be read (reset, timeout…).
       // Record what we know and mark the subsegment as faulted.
@@ -288,4 +291,71 @@ final class _TracedRequest implements HttpClientRequest {
   bool get persistentConnection => _inner.persistentConnection;
   @override
   set persistentConnection(bool v) => _inner.persistentConnection = v;
+}
+
+/// Wraps [HttpClientResponse] to defer the subsegment close until the response
+/// body stream is fully consumed. If the stream errors, the subsegment is
+/// marked as faulted instead of completing normally.
+final class _TracedResponse extends Stream<List<int>>
+    implements HttpClientResponse {
+  _TracedResponse(this._inner, this._sub, this._tracer) : _done = false {
+    _stream = _inner.transform(StreamTransformer.fromHandlers(
+      handleData: (data, sink) => sink.add(data),
+      handleError: (e, st, sink) {
+        _tracer.failSubsegment(_sub, e);
+        sink.addError(e, st);
+      },
+      handleDone: (sink) {
+        if (!_done) {
+          _tracer.endSubsegment(_sub);
+          _done = true;
+        }
+        sink.close();
+      },
+    ));
+  }
+
+  final HttpClientResponse _inner;
+  final Subsegment _sub;
+  final XRayTracer _tracer;
+  bool _done;
+  late Stream<List<int>> _stream;
+
+  @override
+  StreamSubscription<List<int>> listen(
+    void Function(List<int>)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) =>
+      _stream.listen(onData, onError: onError, onDone: onDone, cancelOnError: cancelOnError);
+
+  // HttpClientResponse properties — delegated to _inner.
+  @override
+  int get statusCode => _inner.statusCode;
+  @override
+  String get reasonPhrase => _inner.reasonPhrase;
+  @override
+  int get contentLength => _inner.contentLength;
+  @override
+  HttpClientResponseCompressionState get compressionState => _inner.compressionState;
+  @override
+  HttpHeaders get headers => _inner.headers;
+  @override
+  bool get isRedirect => _inner.isRedirect;
+  @override
+  bool get persistentConnection => _inner.persistentConnection;
+  @override
+  List<RedirectInfo> get redirects => _inner.redirects;
+  @override
+  List<Cookie> get cookies => _inner.cookies;
+  @override
+  HttpConnectionInfo? get connectionInfo => _inner.connectionInfo;
+  @override
+  X509Certificate? get certificate => _inner.certificate;
+  @override
+  Future<Socket> detachSocket() => _inner.detachSocket();
+  @override
+  Future<HttpClientResponse> redirect([String? method, Uri? url, bool? followLoops]) =>
+      _inner.redirect(method, url, followLoops);
 }

@@ -1,3 +1,4 @@
+import 'aws_data.dart';
 import 'cause.dart';
 import 'http_data.dart';
 import 'subsegment.dart';
@@ -16,6 +17,7 @@ final class Segment {
     required this.inProgress,
     this.endTime,
     this.parentId,
+    this.namespace,
     this.fault = false,
     this.error = false,
     this.throttle = false,
@@ -37,12 +39,13 @@ final class Segment {
   final double? endTime;
   final bool inProgress;
   final String? parentId;
+  final String? namespace;
   final bool fault;
   final bool error;
   final bool throttle;
   final Cause? cause;
   final HttpData? http;
-  final Map<String, Object>? aws;
+  final AwsData? aws;
   final Map<String, Object>? annotations;
   // X-Ray schema: {"namespace": {"key": value}}
   final Map<String, Map<String, Object>>? metadata;
@@ -55,6 +58,7 @@ final class Segment {
     required String name,
     required TraceId traceId,
     String? parentId,
+    String? namespace,
     String? user,
     String? origin,
   }) =>
@@ -65,15 +69,30 @@ final class Segment {
         startTime: _nowSeconds(),
         inProgress: true,
         parentId: parentId,
+        namespace: namespace,
         user: user,
         origin: origin,
       );
 
   /// Returns a closed copy with [endTime] set.
-  Segment close() => _copyWith(endTime: _nowSeconds(), inProgress: false);
+  ///
+  /// Calling this on an already-closed segment (i.e. [endTime] is non-null)
+  /// is a no-op — the original timing is preserved.
+  Segment close() {
+    if (endTime != null) return this;
+    return _copyWith(endTime: _nowSeconds(), inProgress: false);
+  }
 
-  Segment withFault() => _copyWith(fault: true);
-  Segment withError() => _copyWith(error: true);
+  Segment withFault([Object? err]) => _copyWith(
+        fault: true,
+        cause: err != null ? Cause(exceptions: [XRayException.from(err)]) : cause,
+      );
+
+  Segment withError([Object? err]) => _copyWith(
+        error: true,
+        cause: err != null ? Cause(exceptions: [XRayException.from(err)]) : cause,
+      );
+
   Segment withThrottle() => _copyWith(throttle: true, error: true);
 
   Segment addSubsegment(Subsegment sub) =>
@@ -100,12 +119,13 @@ final class Segment {
         if (endTime != null) 'end_time': endTime,
         if (inProgress) 'in_progress': true,
         if (parentId != null) 'parent_id': parentId,
+        if (namespace != null) 'namespace': namespace,
         if (fault) 'fault': true,
         if (error) 'error': true,
         if (throttle) 'throttle': true,
         if (cause != null) 'cause': cause!.toJson(),
         if (http != null) 'http': http!.toJson(),
-        if (aws != null) 'aws': aws,
+        if (aws != null) 'aws': aws!.toJson(),
         if (annotations != null) 'annotations': annotations,
         if (metadata != null) 'metadata': metadata,
         if (service != null) 'service': service,
@@ -123,7 +143,7 @@ final class Segment {
     bool? throttle,
     Cause? cause,
     HttpData? http,
-    Map<String, Object>? aws,
+    AwsData? aws,
     Map<String, Object>? annotations,
     Map<String, Map<String, Object>>? metadata,
     List<Subsegment>? subsegments,
@@ -136,6 +156,7 @@ final class Segment {
         endTime: endTime ?? this.endTime,
         inProgress: inProgress ?? this.inProgress,
         parentId: parentId,
+        namespace: namespace,
         fault: fault ?? this.fault,
         error: error ?? this.error,
         throttle: throttle ?? this.throttle,

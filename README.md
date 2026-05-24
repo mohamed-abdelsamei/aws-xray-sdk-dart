@@ -1,4 +1,4 @@
-# aws_xray_sdk
+# [aws_xray_sdk](https://pub.dev/packages/aws_xray_sdk)
 
 A Dart package for distributed tracing with [AWS X-Ray](https://aws.amazon.com/xray/).
 
@@ -24,10 +24,12 @@ via UDP — with first-class support for AWS Lambda custom runtimes.
 
 ## Installation
 
+[![pub package](https://img.shields.io/pub/v/aws_xray_sdk.svg)](https://pub.dev/packages/aws_xray_sdk)
+
 ```yaml
 # pubspec.yaml
 dependencies:
-  aws_xray_sdk: ^0.1.0
+  aws_xray_sdk: ^0.2.0
 ```
 
 ```bash
@@ -104,6 +106,20 @@ await tracer.run(segment, () async {
     rethrow;
   }
 });
+```
+
+### Recording errors on the segment itself
+
+`Segment` mirrors the `Subsegment` error API — pass an optional exception to
+capture it in the X-Ray `cause` block:
+
+```dart
+final segment = tracer.beginSegment();
+try {
+  await tracer.run(segment, fn);
+} catch (e) {
+  await tracer.closeSegment(segment.withFault(e));  // fault=true + cause
+}
 ```
 
 ---
@@ -206,77 +222,51 @@ final tracer = XRayTracer(
 
 ### Using `aws_lambda_dart_runtime_ns`
 
-If you use the [`aws_lambda_dart_runtime_ns`](https://pub.dev/packages/aws_lambda_dart_runtime_ns)
-community package (Dart 3, actively maintained), the runtime controls the event
-loop and uses `package:http` internally. Wrap the runtime loop with
-`invokeWithXRay()` to intercept the `Lambda-Runtime-Trace-Id` header, and wrap
-each handler with `xRayHandler()`:
+A minimal shim for the [`aws_lambda_dart_runtime_ns`](https://pub.dev/packages/aws_lambda_dart_runtime_ns)
+package intercepts the `Lambda-Runtime-Trace-Id` header and wraps each handler
+with `runLambda`:
 
 ```dart
-// main.dart
-void main() async {
-  final tracer = _setupTracer();
-  XRay.patchHttp(tracer);  // must be before any HttpClient is created
-
-  await invokeWithXRay(() => invokeAwsLambdaRuntime([
-    xRayHandler(name: 'fn.handler', tracer: tracer, action: handleEvent),
-  ]));
-}
-
-// xray_handler.dart — minimal integration shim
 String _lambdaTraceHeader = '';
 
-http.Client _capturingClient() => _TraceCapturingClient(http.Client());
-
-class _TraceCapturingClient extends http.BaseClient {
-  final http.Client _inner;
-  _TraceCapturingClient(this._inner);
-
-  @override
-  Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    final res = await _inner.send(request);
-    final h = res.headers['lambda-runtime-trace-id'];
-    if (h != null && h.isNotEmpty) _lambdaTraceHeader = h;
-    return res;
-  }
-}
-
+// Wrap the runtime loop to capture the trace header from /invocation/next:
 Future<void> invokeWithXRay(Future<void> Function() fn) =>
-    http.runWithClient(fn, _capturingClient);
+    http.runWithClient(fn, () {
+      final inner = http.Client();
+      return http.BaseClient()
+        ..send = (req) async {
+          final res = await inner.send(req);
+          final h = res.headers['lambda-runtime-trace-id'];
+          if (h != null && h.isNotEmpty) _lambdaTraceHeader = h;
+          return res;
+        };
+    }());
 
-FunctionHandler xRayHandler({
-  required String name,
-  required XRayTracer tracer,
-  required FunctionAction action,
-}) =>
+FunctionHandler xRayHandler({required XRayTracer tracer, required FunctionAction action}) =>
     FunctionHandler(
-      name: name,
-      action: (ctx, event) => _traced(tracer, ctx, () => action(ctx, event)),
+      name: 'xray',
+      action: (ctx, event) async {
+        final raw = _lambdaTraceHeader;
+        final traceId = TraceId.tryParse(raw) ?? TraceId.generate();
+        final parentId = TraceId.parseParentId(raw);
+        if (parentId != null) {
+          return tracer.runLambda(traceId, parentId, ctx.functionName,
+              () => action(ctx, event),
+              sampled: TraceId.parseSampled(raw) ?? true);
+        }
+        final segment = Segment.begin(name: ctx.functionName, traceId: traceId);
+        return tracer.run(segment, () => action(ctx, event));
+      },
     );
 
-Future<InvocationResult> _traced(
-  XRayTracer tracer,
-  RuntimeContext ctx,
-  Future<InvocationResult> Function() fn,
-) {
-  final raw = _lambdaTraceHeader;
-  final traceId = TraceId.tryParse(raw) ?? TraceId.generate();
-  final parentId = TraceId.parseParentId(raw);
-  final sampled = TraceId.parseSampled(raw) ?? true;
-  if (parentId != null) {
-    return tracer.runLambda(traceId, parentId, ctx.functionName, fn,
-        sampled: sampled);
-  }
-  // Local dev / no runtime present
-  final segment = Segment.begin(name: ctx.functionName, traceId: traceId);
-  return tracer.run(segment, fn);
+void main() async {
+  final tracer = XRayTracer(serviceName: 'my-function');
+  XRay.patchHttp(tracer);
+  await invokeWithXRay(() => invokeAwsLambdaRuntime([
+    xRayHandler(tracer: tracer, action: handleEvent),
+  ]));
 }
 ```
-
-`invokeWithXRay` wraps the runtime's `package:http` calls so every
-`/invocation/next` response is seen by `_TraceCapturingClient`, which stores
-the authoritative `Lambda-Runtime-Trace-Id` header. `xRayHandler` reads that
-stored value (always set before the handler fires) instead of the env var.
 
 ### Complete Lambda examples
 
@@ -289,6 +279,14 @@ See the workspace demos for fully deployable CDK applications:
 
 ## Sampling
 
+The sampling decision is made once at `tracer.run()` entry and stored in the
+zone so every downstream header injection uses the same `Sampled=1/0` flag.
+Pass `httpMethod` and `urlPath` to `run()` to give the sampler contextual info:
+
+```dart
+await tracer.run(segment, fn, httpMethod: 'POST', urlPath: '/checkout');
+```
+
 ```dart
 // Fixed rate — sample N% of all requests
 XRayTracer(sampling: FixedRateSampler(0.05))  // 5 %
@@ -296,11 +294,11 @@ XRayTracer(sampling: FixedRateSampler(0.05))  // 5 %
 // Reservoir — keep up to N traces/second, then fall back to fixed rate
 XRayTracer(sampling: ReservoirSampler(reservoirSize: 50, fixedRate: 0.05))
 
-// Custom strategy
+// Custom strategy — sample based on request properties
 class MyRuleSampler implements SamplingStrategy {
   @override
   bool shouldSample(SamplingRequest req) =>
-      req.urlPath.startsWith('/checkout');  // always trace checkouts
+      req.urlPath.startsWith('/checkout');
 }
 ```
 
@@ -312,7 +310,8 @@ class MyRuleSampler implements SamplingStrategy {
 |---|---|
 | `UdpSender` (default) | Fire-and-forget UDP to the X-Ray daemon (`127.0.0.1:2000`) |
 | `NoopSender` | Discards all segments; useful for tests and local dev |
-| `HttpApiSender` | PutTraceSegments HTTP API — **stub, pending SigV4 signing** |
+
+> **Note:** `HttpApiSender` (PutTraceSegments HTTP API) is not exported — SigV4 request signing is not yet implemented. Use `UdpSender` for all deployments.
 
 ```dart
 // Tests — discard all segments
@@ -374,11 +373,12 @@ XRayTracer.run / runLambda        Zone stores: Segment, []Subsegment, sampled
                  └─ wrap send fn → beginSubsegment, await, endSubsegment
        │
        ▼
-  finally block
+   finally block (run path)        runLambda path
        │
-       ├── encode(segment)         1 packet if ≤64 KB, else skeleton + subsegment docs
-       │
-       └── UdpSender.send          fire-and-forget UDP → 127.0.0.1:2000
+       ├── encode(segment)         encodeSubsegmentDoc()
+       │                           (independent subsegment)
+       └── UdpSender.send          UdpSender.sendPackets
+           fire-and-forget UDP → 127.0.0.1:2000
 ```
 
 **Zone-based context** means you never pass the tracer or segment through
@@ -409,11 +409,11 @@ open https://console.aws.amazon.com/xray/home
 lib/
   aws_xray_sdk.dart              # public barrel export
   src/
-    tracer.dart                  # XRayTracer  — run(), runLambda(), subsegment API
+    tracer.dart                  # XRayTracer  — run(), runLambda(), _runZoned(), subsegment API
     xray.dart                    # XRay facade — patchHttp(), fromClient<T>()
     utils.dart                   # randomHex(), nowSeconds()
     models/
-      segment.dart               # Segment       (immutable value object)
+      segment.dart               # Segment       (immutable value object; aws typed as AwsData)
       subsegment.dart            # Subsegment    (immutable value object)
       trace_id.dart              # TraceId       — generate, parse, header fields
       http_data.dart             # HttpData, HttpRequestData, HttpResponseData
@@ -423,11 +423,11 @@ lib/
     sampling/
       sampling_strategy.dart     # SamplingRequest, SamplingStrategy interface
       fixed_rate_sampler.dart    # FixedRateSampler
-      reservoir_sampler.dart     # ReservoirSampler
+      reservoir_sampler.dart     # ReservoirSampler  (one instance per isolate)
     sender/
       sender.dart                # Sender abstract class  (send, close, sendPackets)
       udp_sender.dart            # UdpSender     — fire-and-forget UDP
-      http_api_sender.dart       # HttpApiSender — stub (pending SigV4)
+      http_api_sender.dart       # HttpApiSender — not exported; stub pending SigV4
       noop_sender.dart           # NoopSender    — discard (tests / dev)
       segment_encoder.dart       # encode(), encodeSubsegmentDoc()
     http/
@@ -439,6 +439,31 @@ lib/
       resource_extractor.dart    # ResourceExtractor — DDB/S3/KMS/SQS/SNS
       aws_service_names.dart     # client type → X-Ray namespace string
 ```
+
+---
+
+## Roadmap
+
+### In progress / known stubs
+
+| Item | File | Notes |
+|---|---|---|
+| `HttpApiSender` SigV4 signing | `sender/http_api_sender.dart` | Throws `UnimplementedError`; class is not exported. Implement AWS SigV4 request signing to enable the PutTraceSegments HTTP API path. |
+| `SqlData` wiring | `models/sql_data.dart` | Model is complete but nothing populates it. Needs a database driver interceptor (e.g. a `postgres` / `sqflite` wrapper). |
+
+### Planned features
+
+| Feature | Priority | Description |
+|---|---|---|
+| Server-side trace middleware | High | Parse `X-Amzn-Trace-Id` from incoming HTTP requests, create/continue a `Segment`, and inject the header into responses. Shelf and `dart:io` `HttpServer` variants. |
+| `package:http` `BaseClient` wrapper | Medium | `XRayHttpClient` covers `dart:io` and `package:http`'s `IOClient`, but not browser or custom `BaseClient` subclasses. A `XRayBaseClient` wrapper would fill this gap. |
+| Dynamic sampling rules (X-Ray API) | Medium | Poll the X-Ray `GetSamplingRules` / `GetSamplingTargets` API and apply centrally managed rules, matching the behaviour of the official SDKs. |
+| X-Ray groups and filter expressions | Low | Support emitting `service` and `origin` metadata that X-Ray filter expressions can target for trace grouping and alerting. |
+| `TracedSpan` mixin / base class | Low | `Segment` and `Subsegment` share ~150 lines of identical fields and `_copyWith` / `toJson` logic. Extracting a common mixin would reduce duplication and make future field additions cheaper. |
+| `segment.namespace` field | Low | X-Ray segment documents accept a top-level `namespace` field. `Subsegment` already has one; `Segment` does not. |
+| Injected clock for testing | Low | `nowSeconds()` reads `DateTime.now()` directly, making timing-sensitive tests depend on wall-clock sleep. An injectable clock would allow deterministic tests with no `Future.delayed`. |
+| `X-Amzn-Trace-Id` response header propagation | Low | Outbound requests inject the trace header, but server responses do not. Downstream services lose continuity when the SDK runs in a server role. |
+| Response body stream error capture | Low | `_TracedRequest.close()` records the HTTP status before the body stream is consumed; a streaming error during `drain()` is invisible to X-Ray. |
 
 ---
 

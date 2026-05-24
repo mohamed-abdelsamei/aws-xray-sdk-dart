@@ -7,9 +7,14 @@ void main() async {
     sampling: FixedRateSampler(1.0),
   );
 
+  // Segment.begin accepts an optional namespace parameter:
+  //   'aws'    — for AWS SDK calls
+  //   'remote' — for external HTTP calls
+  //   'local'  — for local / database work
   final segment = Segment.begin(
     name: 'my-operation',
     traceId: TraceId.generate(),
+    namespace: 'local',
   ).annotate('environment', 'demo').addMetadata('request_id', '12345');
 
   await tracer.run(segment, () async {
