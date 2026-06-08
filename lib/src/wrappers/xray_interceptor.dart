@@ -1,5 +1,5 @@
 import '../models/aws_data.dart';
-import '../models/http_data.dart';
+import '../trace_suppression.dart';
 import '../tracer.dart';
 import 'resource_extractor.dart';
 
@@ -74,22 +74,21 @@ final class XRayInterceptor<Req, Res> {
         }
 
         try {
-          final response = await inner(tracedRequest);
+          // Suppress the global dart:io patch for the inner send so a patched
+          // HttpClient underneath the Smithy transport does not trace this same
+          // request again as a bare host-named subsegment.
+          final response =
+              await runWithoutDartIoTracing(() => inner(tracedRequest));
           final resAdapted = _responseAdapter(response);
 
           sub = sub
-              .withHttp(HttpData(
-                request: HttpRequestData(
-                  method: adapted.method,
-                  url: adapted.url,
-                ),
-                response: HttpResponseData(
-                  status: resAdapted.statusCode,
-                  contentLength: resAdapted.contentLength,
-                ),
-              ))
-              .withAws(awsData)
-              .applyStatus(resAdapted.statusCode);
+              .withHttpCall(
+                method: adapted.method,
+                url: adapted.url,
+                status: resAdapted.statusCode,
+                contentLength: resAdapted.contentLength,
+              )
+              .withAws(awsData);
 
           _tracer.endSubsegment(sub);
           return response;

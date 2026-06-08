@@ -109,4 +109,58 @@ abstract final class XRay {
       HttpOverrides.global = current.previous;
     }
   }
+
+  /// Creates an [HttpClient] that is **not** traced by [patchHttp].
+  ///
+  /// When [patchHttp] is active, every `HttpClient()` created anywhere is
+  /// wrapped with `XRayHttpClient`.
+  ///
+  /// You usually do **not** need this to avoid double-tracing: `XRayBaseClient`
+  /// and `XRay.fromClient` already suppress the global patch while they send,
+  /// so wrapping a plain `http.Client()` with them yields exactly one
+  /// subsegment even under `patchHttp`.
+  ///
+  /// Reach for this only when you want a client that emits **no** X-Ray
+  /// subsegment at all while a global patch is active — for example a
+  /// health-check or polling client whose requests should stay out of traces:
+  ///
+  /// ```dart
+  /// final untraced = IOClient(XRay.untracedHttpClient());
+  /// await untraced.get(healthCheckUri); // no subsegment, even under patchHttp
+  /// ```
+  ///
+  /// The returned client comes from the overrides that were in place before the
+  /// X-Ray patch (or the platform default if none), so it bypasses
+  /// [XRayHttpOverrides] entirely.
+  ///
+  /// Note: a bare `HttpClient()` constructor always consults
+  /// [HttpOverrides.current], and `HttpOverrides.runZoned(..., createHttpClient:
+  /// null)` chains back to the previously-active override — so naively it would
+  /// still be re-wrapped by an active patch. To get a genuinely unwrapped
+  /// client, this supplies an explicit factory that builds the platform-default
+  /// client (`_DefaultHttpOverrides().createHttpClient`), or delegates to the
+  /// pre-patch override when one existed.
+  static HttpClient untracedHttpClient([SecurityContext? context]) {
+    final current = HttpOverrides.current;
+
+    // A non-XRay override is in effect (e.g. the consumer's own): honour it.
+    if (current != null && current is! XRayHttpOverrides) {
+      return current.createHttpClient(context);
+    }
+
+    // An XRay patch (or no override). Build the client with an explicit factory
+    // so it is never routed back through XRayHttpOverrides.
+    final previous = current is XRayHttpOverrides ? current.previous : null;
+    final factory = previous != null
+        ? previous.createHttpClient
+        : _DefaultHttpOverrides().createHttpClient;
+    return HttpOverrides.runZoned(
+      () => HttpClient(context: context),
+      createHttpClient: factory,
+    );
+  }
 }
+
+/// A base [HttpOverrides] whose `createHttpClient` returns the platform-default
+/// `dart:io` client (via `super`), with no tracing wrapper.
+final class _DefaultHttpOverrides extends HttpOverrides {}

@@ -46,5 +46,18 @@ void main() {
       expect(s.fault, isTrue);
       expect(s.cause!.exceptions.first.message, contains('boom'));
     });
+
+    test('annotate sanitizes the key and coerces a non-scalar value', () {
+      final s = Subsegment.begin(name: 'op', namespace: 'aws')
+          .annotate('user name', {'a': 1});
+      expect(s.annotations!.containsKey('user name'), isFalse);
+      expect(s.annotations!['user_name'], '{a: 1}');
+    });
+
+    test('annotate keeps a valid key and scalar value unchanged', () {
+      final s =
+          Subsegment.begin(name: 'op', namespace: 'aws').annotate('retries', 2);
+      expect(s.annotations!['retries'], 2);
+    });
   });
 }

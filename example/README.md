@@ -127,9 +127,9 @@ dart run example/server_middleware.dart
 
 ### 8. [manual_instrumentation.dart](manual_instrumentation.dart)
 
-Manual instrumentation for non-AWS code: annotations, metadata, SQL
-subsegments (`SqlData`), and custom sampling — without any AWS SDK client
-involved.  Useful when wrapping a database driver or internal library.
+Manual instrumentation for non-AWS code: annotations, metadata, nested
+subsegments, and custom sampling — without any AWS SDK client involved.
+Useful when wrapping a database driver or internal library.
 
 ```bash
 dart run example/manual_instrumentation.dart

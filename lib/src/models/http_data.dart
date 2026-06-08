@@ -15,23 +15,14 @@ final class HttpRequestData {
   const HttpRequestData({
     required this.method,
     required this.url,
-    this.userAgent,
-    this.clientIp,
-    this.xForwardedFor = false,
   });
 
   final String method;
   final String url;
-  final String? userAgent;
-  final String? clientIp;
-  final bool xForwardedFor;
 
   Map<String, Object?> toJson() => {
         'method': method,
         'url': url,
-        if (userAgent != null) 'user_agent': userAgent,
-        if (clientIp != null) 'client_ip': clientIp,
-        if (xForwardedFor) 'x_forwarded_for': true,
       };
 }
 

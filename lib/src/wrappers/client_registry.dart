@@ -1,4 +1,3 @@
-import 'aws_service_names.dart';
 import 'resource_extractor.dart';
 import 'xray_interceptor.dart' show SmithyRequestAdapter, SmithyResponseAdapter;
 
@@ -79,9 +78,3 @@ final Map<Type, ClientDescriptor<Object>> clientRegistry = {};
 /// Looks up the descriptor for type [T], or `null` if not registered.
 ClientDescriptor<T>? descriptorFor<T extends Object>() =>
     clientRegistry[T] as ClientDescriptor<T>?;
-
-/// Convenience accessor: namespace string for a registered type [T].
-String namespaceFor<T extends Object>() =>
-    (clientRegistry[T]?.namespace) ??
-    awsServiceNamespaces[T.toString()] ??
-    'aws';

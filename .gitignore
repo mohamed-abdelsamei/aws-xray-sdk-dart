@@ -26,3 +26,23 @@ lcov.info
 
 # Test cache
 .test_results/
+
+# Claude Code — local agent settings and session state
+.claude/
+
+# Local environment / credentials (AWS profiles, daemon overrides, etc.)
+.env
+.env.*
+*.env
+*.env.local
+
+# Local-only scripts and overrides (not meant for the shared repo)
+scripts/local-*.sh
+local/
+*.local.dart
+
+# CDK context and build output (demo sub-projects manage their own ignores,
+# but guard against accidental leaks from the package root)
+cdk.context.json
+cdk.out/
+.co-agents

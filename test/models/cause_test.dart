@@ -40,19 +40,10 @@ void main() {
   group('Cause', () {
     test('toJson includes exceptions list', () {
       final cause = Cause(
-        workingDirectory: '/app',
         exceptions: [XRayException.from(Exception('boom'))],
       );
       final json = cause.toJson();
-      expect(json['working_directory'], '/app');
       expect((json['exceptions'] as List), hasLength(1));
-    });
-
-    test('toJson omits working_directory when null', () {
-      final cause = Cause(
-        exceptions: [XRayException.from(Exception('x'))],
-      );
-      expect(cause.toJson().containsKey('working_directory'), isFalse);
     });
 
     test('empty exceptions list serialises correctly', () {

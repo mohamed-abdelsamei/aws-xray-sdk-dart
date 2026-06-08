@@ -1,6 +1,13 @@
-/// Maps Smithy client type names to X-Ray namespace strings.
+/// Maps Smithy client **type names** to X-Ray namespace strings.
 ///
-/// X-Ray uses `"AWS::<ServiceName>"` for the `namespace` field.
+/// X-Ray uses `"AWS::<ServiceName>"` for the `namespace` field. This is the
+/// single client-type → namespace resolution path, used by
+/// [XRay.registerClient] / [XRay.fromClient] as
+/// `awsServiceNamespaces[T.toString()] ?? 'aws'`.
+///
+/// Note: this is keyed by Smithy client *type name* (e.g. `DynamoDbClient`) and
+/// is distinct from the host-prefix → display-name map used by `XRayBaseClient`
+/// for `package:http` AWS calls (e.g. `dynamodb` → `DynamoDB`).
 const Map<String, String> awsServiceNamespaces = {
   'DynamoDbClient': 'AWS::DynamoDB',
   'S3Client': 'AWS::S3',
@@ -11,7 +18,3 @@ const Map<String, String> awsServiceNamespaces = {
   'LambdaClient': 'AWS::Lambda',
   'StsClient': 'AWS::STS',
 };
-
-/// Returns the X-Ray namespace for a client instance, or `"aws"` if unknown.
-String namespaceForClient(Object client) =>
-    awsServiceNamespaces[client.runtimeType.toString()] ?? 'aws';

@@ -1,17 +1,14 @@
 name: aws_xray_sdk
 description: AWS X-Ray distributed tracing for Dart. Auto-traces dart:io HTTP and Smithy SDK clients, propagates X-Amzn-Trace-Id, and sends segments via UDP. First-class Lambda support.
-version: 0.1.0
+version: 0.2.0
 repository: https://github.com/mohamed-abdelsamei/aws-xray-sdk-dart
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
 
 dependencies:
-  # No runtime dependencies beyond the Dart SDK core libraries.
-  # Smithy HttpClient types are referenced via conditional imports;
-  # consumers bring their own aws_sdk_dart / smithy dependency.
+  http: ^1.0.0
 
 dev_dependencies:
   lints: ^6.1.0
   test: ^1.24.0
-  mocktail: ^1.0.0
