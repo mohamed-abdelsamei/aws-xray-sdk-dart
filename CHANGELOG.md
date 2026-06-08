@@ -121,7 +121,7 @@ validation, and a dead-code cleanup.
 - Documented X-Ray annotation/metadata constraints, the `ContextMissingPolicy`
   options, local sampler semantics + no-centralized-fallback behavior, the
   double-trace suppression model, and the Lambda subsegment contract (README +
-  `docs/architecture.md`).
+  `doc/architecture.md`).
 - Added a `Segment` / `Subsegment` JSON golden test and broad coverage for the
   HTTP clients, `runLambda`, transport containment, `UdpSender` robustness,
   annotation validation, `handleTraced`, and the resource extractors.
