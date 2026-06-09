@@ -94,7 +94,9 @@ Future<Map<String, Object?>> handleInvocation(
 
   return _tracer.runLambda(
     traceId,
-    parentId!,
+    // The header may have no Parent= (a trace originating at this service, or a
+    // direct/test invocation); runLambda accepts an empty parent id.
+    parentId ?? '',
     _tracer.serviceName,
     () => _handler(event),
     sampled: sampled,

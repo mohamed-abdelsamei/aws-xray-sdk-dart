@@ -229,4 +229,4 @@ git push origin v0.1.0
 - Public API controlled via `lib/aws_xray_sdk.dart` barrel export only.
 - `dart analyze --fatal-warnings` must pass clean — enforced in CI.
 - `pubspec.lock` is gitignored (library, not an app).
-- No runtime dependencies; everything is in `dart:io` / `dart:convert` / `dart:async`.
+- One runtime dependency: `http` (for `XRayBaseClient`); otherwise only `dart:io` / `dart:convert` / `dart:async`.
