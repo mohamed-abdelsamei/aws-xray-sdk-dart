@@ -2,8 +2,10 @@ version: 2
 
 updates:
   # ── GitHub Actions ────────────────────────────────────────────────────────
-  # Keep workflow action versions current and pinned to commit SHAs.
-  # Dependabot will open a PR when a new version of any used action is released.
+  # Keep workflow action versions current. Actions are pinned to floating major
+  # tags (e.g. @v4); Dependabot opens a PR when a new major is released.
+  # (To harden the supply chain, pin to commit SHAs instead — Dependabot keeps
+  # SHA-pinned actions updated too.)
   - package-ecosystem: github-actions
     directory: /
     schedule:
