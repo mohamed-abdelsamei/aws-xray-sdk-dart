@@ -247,6 +247,75 @@ void main() {
       final names = sender.lastSubs.map((s) => (s as Map)['name']).toList();
       expect(names, containsAll(['a', 'b', 'c']));
     });
+
+    test('a properly-ended subsegment is not swept (no double-attach)',
+        () async {
+      // endSubsegment removes the pending entry, so the finalize-time sweep
+      // sees nothing: the span appears once and carries no incomplete flag.
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        final sub = tracer.beginSubsegment('ended');
+        tracer.endSubsegment(sub);
+      });
+
+      expect(sender.lastSubs, hasLength(1));
+      final sub = sender.lastSubs.first as Map;
+      expect(sub['name'], 'ended');
+      expect(sub.containsKey('metadata'), isFalse);
+    });
+
+    test('an un-closed subsegment is swept as incomplete', () async {
+      // A span begun but never ended (its close never fired) would otherwise
+      // be silently dropped; the sweep emits it flagged incomplete.
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        tracer.beginSubsegment('leaked');
+      });
+
+      expect(sender.lastSubs, hasLength(1));
+      final sub = sender.lastSubs.first as Map;
+      expect(sub['name'], 'leaked');
+      expect(((sub['metadata'] as Map)['xray'] as Map)['incomplete'], isTrue);
+      expect(sub['in_progress'], isNull); // closed by the sweep
+    });
+
+    test('a subsegment under captureAsync is swept before the parent closes',
+        () async {
+      late Subsegment leaked;
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await tracer.captureAsync('parent', (_) async {
+          leaked = tracer.beginSubsegment('leaked');
+        });
+        // A late close after the parent-scope sweep must be a no-op, not a
+        // duplicate root-level sibling.
+        tracer.endSubsegment(leaked);
+      });
+
+      expect(sender.lastSubs, hasLength(1));
+      final parent = sender.lastSubs.first as Map;
+      expect(parent['name'], 'parent');
+      final children = parent['subsegments'] as List;
+      expect(children, hasLength(1));
+      final child = children.first as Map;
+      expect(child['name'], 'leaked');
+      expect(((child['metadata'] as Map)['xray'] as Map)['incomplete'], isTrue);
+    });
+
+    test('closing the same subsegment twice records the first outcome once',
+        () async {
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        final sub = tracer.beginSubsegment('once');
+        tracer.failSubsegment(sub, Exception('boom'));
+        tracer.endSubsegment(sub);
+      });
+
+      expect(sender.lastSubs, hasLength(1));
+      final sub = sender.lastSubs.first as Map;
+      expect(sub['name'], 'once');
+      expect(sub['fault'], isTrue);
+    });
   });
 
   group('XRayTracer — segment lifecycle', () {

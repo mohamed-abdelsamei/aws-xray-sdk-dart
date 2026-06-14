@@ -170,15 +170,51 @@ final class TraceScope implements TraceContext {
 /// Per-trace mutable state stored once in the run zone and inherited by every
 /// nested (captured) zone.
 ///
-/// Holds the [root] scope and a registry mapping an open subsegment's id to the
-/// scope that was current when it was begun — so [XRayTracer.endSubsegment] can
-/// attach it to the correct parent even when begin and end happen in different
-/// zones (e.g. an HTTP response stream consumed after the request returned).
+/// Holds the [root] scope and a registry mapping an open subsegment's id to its
+/// parent scope and latest-known open [Subsegment] — so [XRayTracer.endSubsegment]
+/// can attach it to the correct parent even when begin and end happen in
+/// different zones (e.g. an HTTP response stream consumed after the request
+/// returned), and so [sweep] can emit a best-effort document for any span whose
+/// close never fired.
 final class TraceState {
   TraceState(this.root);
 
   final TraceScope root;
-  final Map<String, TraceScope> pendingParents = {};
+
+  /// Open subsegments awaiting close, keyed by id. Each entry carries the
+  /// [parent] scope to attach under and the latest [sub] document the tracer
+  /// knows about (refreshed via [XRayTracer.updatePending] as the HTTP clients
+  /// enrich it). [XRayTracer.endSubsegment] removes the entry on a normal
+  /// close, so anything still here when its parent scope closes never closed.
+  final Map<String, ({TraceScope parent, Subsegment sub})> pending = {};
+
+  /// Subsegment ids already attached or swept. Used to make a second close a
+  /// no-op, including a late body-stream close after an incomplete sweep.
+  final Set<String> closedIds = {};
+
+  /// Closes and attaches still-open spans before their parent scope is frozen.
+  ///
+  /// A subsegment whose body stream was never drained (HEAD, 204/304, a
+  /// status-only early return, or an exception before the body is read) never
+  /// reaches [XRayTracer.endSubsegment], so its [endSubsegment]-on-close removal
+  /// never happens and it lingers here. Without this sweep the parent scope
+  /// would serialize without it — a silently dropped span. Each remaining entry
+  /// is closed, flagged `metadata.xray.incomplete = true`, and attached to its
+  /// parent. Entries are by definition genuinely open (the normal close path
+  /// removes them), so this never double-closes.
+  void sweep({TraceScope? parent}) {
+    final keys = [
+      for (final entry in pending.entries)
+        if (parent == null || identical(entry.value.parent, parent)) entry.key,
+    ];
+    for (final key in keys) {
+      final entry = pending.remove(key);
+      if (entry == null || closedIds.contains(key)) continue;
+      final sub = entry.sub.addMetadata('incomplete', true, namespace: 'xray');
+      entry.parent.addChild(sub.close());
+      closedIds.add(key);
+    }
+  }
 }
 
 /// A no-op [TraceContext] handed to [XRayTracer.captureAsync] when there is no

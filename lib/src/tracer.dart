@@ -15,7 +15,7 @@ export 'trace_scope.dart' show TraceContext;
 // Zone key for the active segment.
 final _zoneKey = #_xraySegment;
 
-// Zone key for the per-trace mutable state (root scope + pending-parent map).
+// Zone key for the per-trace mutable state (root scope + pending subsegments).
 final _stateKey = #_xrayState;
 
 // Zone key for the current open scope (the root, or a captureAsync child).
@@ -191,6 +191,11 @@ final class XRayTracer {
           // silently; per-Sender observability (e.g. UdpSender.onError) is each
           // sender's concern.
           try {
+            // Close any span whose body stream was never drained (so its
+            // close never fired) and attach it to its parent before
+            // serialization — otherwise it would be silently dropped. Runs
+            // inside this containment so a sweep throw can never escape.
+            state.sweep();
             await onComplete(root);
           } catch (_) {
             // Intentionally ignored — tracing must never break the application.
@@ -270,6 +275,7 @@ final class XRayTracer {
       _handleContextMissing();
       return body(const NoopTraceContext());
     }
+    final state = Zone.current[_stateKey] as TraceState?;
     final scope = TraceScope.child(
       name: name,
       namespace: namespace,
@@ -283,6 +289,7 @@ final class XRayTracer {
           scope.recordUncaught(e);
           rethrow;
         } finally {
+          state?.sweep(parent: scope);
           parent.addChild(scope.toSubsegment());
         }
       },
@@ -333,9 +340,26 @@ final class XRayTracer {
     final state = Zone.current[_stateKey] as TraceState?;
     final parent = _currentScope;
     if (state != null && parent != null) {
-      state.pendingParents[sub.id] = parent;
+      state.closedIds.remove(sub.id);
+      state.pending[sub.id] = (parent: parent, sub: sub);
     }
     return sub;
+  }
+
+  /// Refreshes the pending document for an already-begun subsegment.
+  ///
+  /// **Internal — called by the SDK's own traced HTTP clients.** Because a
+  /// subsegment is immutable, the clients build an enriched copy (status, aws
+  /// data, cause) *after* [beginSubsegment]. They register that copy here so a
+  /// span swept at finalization (its body never drained) carries the data the
+  /// client knew rather than the bare open subsegment. If [sub] is no longer
+  /// pending (already attached, or no active trace) this is a no-op.
+  void updatePending(Subsegment sub) {
+    final state = Zone.current[_stateKey] as TraceState?;
+    final entry = state?.pending[sub.id];
+    if (state != null && entry != null) {
+      state.pending[sub.id] = (parent: entry.parent, sub: sub);
+    }
   }
 
   /// Closes [sub] and attaches it to its parent scope.
@@ -351,9 +375,11 @@ final class XRayTracer {
       _handleContextMissing();
       return;
     }
+    if (state.closedIds.contains(sub.id)) return;
     final parent =
-        state.pendingParents.remove(sub.id) ?? _currentScope ?? state.root;
+        state.pending.remove(sub.id)?.parent ?? _currentScope ?? state.root;
     parent.addChild(sub);
+    state.closedIds.add(sub.id);
   }
 
   /// Whether the current zone's trace is being sampled.
