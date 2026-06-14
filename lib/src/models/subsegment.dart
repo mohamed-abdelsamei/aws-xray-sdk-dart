@@ -77,10 +77,10 @@ final class Subsegment {
       );
 
   /// Returns a closed copy with [endTime] set.
-  Subsegment close() => _copyWith(
-        endTime: nowSeconds(),
-        inProgress: false,
-      );
+  Subsegment close() {
+    if (endTime != null) return this;
+    return _copyWith(endTime: nowSeconds(), inProgress: false);
+  }
 
   Subsegment withFault([Object? err]) => _copyWith(
         fault: true,
@@ -111,12 +111,17 @@ final class Subsegment {
     required String url,
     required int status,
     int? contentLength,
+    bool traced = false,
   }) =>
-      withHttp(HttpData(
-        request: HttpRequestData(method: method, url: url),
+      _withHttpStatusCause(status).withHttp(HttpData(
+        request: HttpRequestData(
+          method: method,
+          url: url,
+          traced: traced ? true : null,
+        ),
         response:
             HttpResponseData(status: status, contentLength: contentLength),
-      )).applyStatus(status);
+      ));
 
   Subsegment withAws(AwsData data) => _copyWith(aws: data);
 
@@ -155,6 +160,19 @@ final class Subsegment {
     if (statusCode >= 500) return withFault();
     if (statusCode >= 400) return withError();
     return this;
+  }
+
+  Subsegment _withHttpStatusCause(int statusCode) {
+    final flagged = applyStatus(statusCode);
+    if (statusCode < 400 || flagged.cause != null) return flagged;
+    return flagged.withCause(Cause(exceptions: [
+      XRayException(
+        id: randomHex(16),
+        type: 'HTTP $statusCode',
+        message: 'Downstream HTTP response returned status $statusCode',
+        remote: true,
+      ),
+    ]));
   }
 
   Map<String, Object?> toJson() => {

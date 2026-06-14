@@ -1,4 +1,6 @@
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
+// ignore: implementation_imports
+import 'package:aws_xray_sdk/src/wrappers/client_registry.dart';
 import 'package:test/test.dart';
 
 // A minimal stub client type for registry tests.
@@ -16,8 +18,13 @@ SmithyRequestAdapter<Object> _noopRequestAdapter(Object req) => (
       withTraceHeader: (r, h) => r,
     );
 
-SmithyResponseAdapter<Object> _noopResponseAdapter(Object res) =>
-    (statusCode: 200, contentLength: null);
+SmithyResponseAdapter<Object> _noopResponseAdapter(Object res) => (
+      statusCode: 200,
+      contentLength: null,
+      requestId: null,
+      region: null,
+      errorCode: null,
+    );
 
 void main() {
   group('ClientRegistry', () {
@@ -36,7 +43,7 @@ void main() {
 
       final desc = descriptorFor<_StubClient>();
       expect(desc, isNotNull);
-      expect(desc!.namespace, 'AWS::Stub');
+      expect(desc!.namespace, 'aws');
     });
 
     test('descriptorFor returns null for unregistered type', () {
@@ -94,7 +101,19 @@ void main() {
       );
 
       final desc = descriptorFor<_StubClient>();
-      expect(desc!.namespace, 'AWS::Second');
+      expect(desc!.namespace, 'aws');
+    });
+
+    test('custom non-AWS namespace normalizes to remote', () {
+      XRay.registerClient<_StubClient>(
+        namespace: 'custom',
+        requestAdapter: _noopRequestAdapter,
+        responseAdapter: _noopResponseAdapter,
+        rebuild: (o, _) => o,
+      );
+
+      final desc = descriptorFor<_StubClient>();
+      expect(desc!.namespace, 'remote');
     });
   });
 }

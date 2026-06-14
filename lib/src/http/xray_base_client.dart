@@ -3,21 +3,25 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../aws/region.dart';
+import '../aws/throttle_codes.dart';
 import '../models/aws_data.dart';
 import '../models/cause.dart';
 import '../models/http_data.dart';
+import '../trace_header.dart';
 import '../trace_suppression.dart';
 import '../tracer.dart';
 import '../utils.dart' show awsDomainSuffix;
-import '../wrappers/xray_interceptor.dart' show buildTraceHeader;
 
 /// Wraps [http.Client] to trace every outbound HTTP request through
 /// `package:http`.
 ///
-/// Every request opens a subsegment, injects `X-Amzn-Trace-Id`, and records
-/// the response status. The subsegment is closed only after the response body
-/// stream is fully consumed — body-stream errors are captured and mark the
-/// subsegment as faulted.
+/// Every request opens a subsegment, injects `X-Amzn-Trace-Id`, records
+/// `http.request.traced = true`, and records the response status. The subsegment
+/// is closed after the response body stream is fully consumed. If the caller
+/// never consumes the body, trace finalization emits it once with
+/// `metadata.xray.incomplete = true`; body-stream errors are captured and mark
+/// the subsegment as faulted.
 ///
 /// ## AWS calls
 ///
@@ -29,12 +33,16 @@ import '../wrappers/xray_interceptor.dart' show buildTraceHeader;
 ///    / `queue_url` / `bucket_name` / `key_id` when present in the request),
 ///    parsed from the `X-Amz-Target` header (JSON protocols) or the `Action`
 ///    form field (query protocols), and
-///  * on a non-2xx response, reads the AWS error body and records the AWS
-///    exception `type` + `message` as the subsegment `cause`.
+///  * on a non-2xx response, reads the AWS error body, records the AWS exception
+///    `type` + `message` as the subsegment `cause`, and marks known AWS
+///    throttling error codes as throttled even when the status is not `429`.
 ///
 /// The error cause is read directly from the response because the agilord
 /// `aws_*_api` protocols consume the whole body before throwing, so the thrown
 /// exception never reaches this client's `catch`.
+///
+/// The request object is mutated to inject `X-Amzn-Trace-Id`; treat
+/// `package:http` request instances as single-use.
 ///
 /// Requires `package:http` in your `pubspec.yaml`:
 /// ```yaml
@@ -85,6 +93,7 @@ final class XRayBaseClient extends http.BaseClient {
         url: request.url.toString(),
         status: response.statusCode,
         contentLength: response.contentLength,
+        traced: true,
       );
       if (awsData != null) sub = sub.withAws(awsData);
 
@@ -94,8 +103,11 @@ final class XRayBaseClient extends http.BaseClient {
       final isError = response.statusCode < 200 || response.statusCode >= 300;
       if (isAws && isError) {
         final bytes = await response.stream.toBytes();
-        final cause = _awsErrorCause(response, bytes);
-        if (cause != null) sub = sub.withCause(cause);
+        final error = _awsError(response, bytes);
+        if (error != null) {
+          sub = sub.withCause(error.cause);
+          if (isThrottleErrorCode(error.type)) sub = sub.withThrottle();
+        }
         _tracer.endSubsegment(sub);
         return http.StreamedResponse(
           Stream.value(bytes),
@@ -106,6 +118,11 @@ final class XRayBaseClient extends http.BaseClient {
           request: response.request,
         );
       }
+
+      // Register the enriched sub so that if the caller never drains the body
+      // (HEAD, 204/304, status-only early return), the finalize-time sweep
+      // emits this document — with status/aws data — instead of a bare span.
+      _tracer.updatePending(sub);
 
       var closed = false;
       final tracedSub = sub;
@@ -143,6 +160,7 @@ final class XRayBaseClient extends http.BaseClient {
         request: HttpRequestData(
           method: request.method,
           url: request.url.toString(),
+          traced: true,
         ),
       ));
       if (awsData != null) failed = failed.withAws(awsData);
@@ -211,7 +229,7 @@ final class XRayBaseClient extends http.BaseClient {
 
     return AwsData(
       operation: operation,
-      region: _regionFromHost(request.url.host),
+      region: regionFromAwsHost(request.url.host),
       requestId: response == null ? null : _requestId(response),
       tableName: tableName,
       bucketName: bucketName,
@@ -220,15 +238,6 @@ final class XRayBaseClient extends http.BaseClient {
       topicArn: topicArn,
       resourceNames: resourceNames.isEmpty ? null : resourceNames,
     );
-  }
-
-  /// `dynamodb.us-east-1.amazonaws.com` → `us-east-1` (null for global hosts
-  /// like `sts.amazonaws.com`).
-  static String? _regionFromHost(String host) {
-    final parts = host.split('.');
-    // <service>.<region>.amazonaws.com  → 4 labels with a hyphenated region.
-    if (parts.length == 4 && parts[1].contains('-')) return parts[1];
-    return null;
   }
 
   /// The AWS request id from the response headers, if present.
@@ -276,9 +285,9 @@ final class XRayBaseClient extends http.BaseClient {
     }
   }
 
-  /// Reads an AWS error response body and builds a [Cause] carrying the AWS
+  /// Reads an AWS error response body and builds a cause carrying the AWS
   /// exception `type` and `message`.
-  static Cause? _awsErrorCause(
+  static ({String type, Cause cause})? _awsError(
       http.StreamedResponse response, List<int> bytes) {
     String type =
         response.headers['x-amzn-errortype']?.split(':').first ?? 'HttpError';
@@ -302,14 +311,17 @@ final class XRayBaseClient extends http.BaseClient {
 
     // remote: true — the error came from a downstream service, per the X-Ray
     // schema and the Node.js SDK convention for AWS-SDK call failures.
-    return Cause(exceptions: [
-      XRayException(
-        id: _exceptionId(),
-        type: type,
-        message: message,
-        remote: true,
-      ),
-    ]);
+    return (
+      type: type,
+      cause: Cause(exceptions: [
+        XRayException(
+          id: _exceptionId(),
+          type: type,
+          message: message,
+          remote: true,
+        ),
+      ]),
+    );
   }
 
   static String? _xmlTag(String xml, String tag) {

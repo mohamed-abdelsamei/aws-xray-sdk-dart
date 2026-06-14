@@ -3,10 +3,10 @@ import 'dart:convert' show Encoding;
 import 'dart:io';
 import '../models/http_data.dart';
 import '../models/subsegment.dart';
+import '../trace_header.dart';
 import '../trace_suppression.dart';
 import '../tracer.dart';
 import '../utils.dart' show awsDomainSuffix;
-import '../wrappers/xray_interceptor.dart' show buildTraceHeader;
 
 /// Wraps a `dart:io` [HttpClient] to trace every outbound HTTP request.
 ///
@@ -219,7 +219,13 @@ final class _TracedRequest implements HttpClientRequest {
         method: _method,
         url: _url.toString(),
         status: response.statusCode,
+        traced: true,
       );
+
+      // Register the enriched sub so that if the caller never drains the body
+      // (HEAD, 204/304, status-only early return), the finalize-time sweep
+      // emits this document — with its status — instead of a bare span.
+      _tracer.updatePending(_sub);
 
       // Wrap the response stream so the subsegment is closed only after the
       // body is fully consumed. If the body stream errors (e.g. connection
@@ -230,7 +236,11 @@ final class _TracedRequest implements HttpClientRequest {
       // Record what we know and mark the subsegment as faulted.
       _tracer.failSubsegment(
         _sub.withHttp(HttpData(
-          request: HttpRequestData(method: _method, url: _url.toString()),
+          request: HttpRequestData(
+            method: _method,
+            url: _url.toString(),
+            traced: true,
+          ),
         )),
         e,
       );
@@ -381,6 +391,7 @@ final class _TracedResponse extends Stream<List<int>>
           method: _method,
           url: _url.toString(),
           status: _inner.statusCode,
+          traced: true,
         ),
       );
       _done = true;

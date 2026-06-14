@@ -93,6 +93,7 @@ void main() {
       final request = http['request'] as Map;
       expect(request['method'], 'POST');
       expect(request['url'], 'https://api.example.com/submit');
+      expect(request['traced'], isTrue);
     });
 
     test('records response status code', () async {
@@ -121,6 +122,11 @@ void main() {
 
       final sub = sender.lastSubs.first as Map;
       expect(sub['fault'], isTrue);
+      final cause = sub['cause'] as Map;
+      final exc = (cause['exceptions'] as List).first as Map;
+      expect(exc['type'], 'HTTP 500');
+      expect(exc['message'], contains('500'));
+      expect(exc['remote'], isTrue);
     });
 
     test('429 marks subsegment as throttle', () async {
@@ -259,6 +265,32 @@ void main() {
       expect((sub['aws'] as Map)['table_name'], 'missing');
     });
 
+    test('aws throttle error code marks non-429 response as throttled',
+        () async {
+      final inner = _MockClient(
+        400,
+        body: jsonEncode({
+          '__type': 'com.amazonaws#ProvisionedThroughputExceededException',
+          'message': 'Rate exceeded',
+        }),
+      );
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.post(
+          Uri.parse('https://dynamodb.us-east-1.amazonaws.com/'),
+          headers: {'X-Amz-Target': 'DynamoDB_20120810.GetItem'},
+        );
+      });
+
+      final sub = sender.lastSubs.first as Map;
+      expect(sub['throttle'], isTrue);
+      expect(sub['error'], isTrue);
+      final exc = ((sub['cause'] as Map)['exceptions'] as List).first as Map;
+      expect(exc['type'], 'ProvisionedThroughputExceededException');
+    });
+
     test('records aws error cause from XML error body', () async {
       final inner = _MockClient(
         403,
@@ -299,6 +331,48 @@ void main() {
       });
 
       expect(received, errBody);
+    });
+
+    test('un-drained response is swept as exactly one incomplete subsegment',
+        () async {
+      // A caller that reads only the status and never listens to the body
+      // (HEAD, 204/304, status-only early return) never triggers handleDone,
+      // so the deferred endSubsegment never fires. The finalize-time sweep
+      // must still emit the span — once — flagged incomplete and carrying the
+      // status the client knew.
+      final inner = _MockClient(204);
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        final res = await client.send(http.Request(
+            'GET', Uri.parse('https://api.example.com/status-only')));
+        expect(res.statusCode, 204);
+        // Intentionally never drain res.stream.
+      });
+
+      expect(sender.lastSubs, hasLength(1));
+      final sub = sender.lastSubs.first as Map;
+      expect(((sub['metadata'] as Map)['xray'] as Map)['incomplete'], isTrue);
+      expect((sub['http'] as Map)['response']['status'], 204);
+      expect(sub['in_progress'], isNull); // closed by the sweep
+    });
+
+    test('drained response is exactly one subsegment, not flagged incomplete',
+        () async {
+      // Regression: the normal path still closes once via handleDone and is
+      // never touched by the sweep (it was removed from pending on close).
+      final inner = _MockClient(200);
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.get(Uri.parse('https://api.example.com/data'));
+      });
+
+      expect(sender.lastSubs, hasLength(1));
+      final sub = sender.lastSubs.first as Map;
+      expect(sub.containsKey('metadata'), isFalse);
     });
 
     test('body-stream error marks subsegment as faulted', () async {

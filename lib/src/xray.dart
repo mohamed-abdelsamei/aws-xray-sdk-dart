@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'http/xray_http_overrides.dart';
 import 'tracer.dart';
-import 'wrappers/aws_service_names.dart';
 import 'wrappers/client_registry.dart';
 import 'wrappers/resource_extractor.dart';
 import 'wrappers/xray_interceptor.dart';
@@ -51,12 +50,13 @@ abstract final class XRay {
 
   /// Registers a Smithy client type so [fromClient] can wrap it.
   ///
-  /// [namespace] defaults to the value in [awsServiceNamespaces] for [T].
+  /// [namespace] defaults to `aws`.
   /// [extractor] defaults to the built-in extractor for [T] if available.
   ///
   /// [requestAdapter] and [responseAdapter] extract tracing metadata from the
   /// client's type-erased request and response objects. Consumers cast to
-  /// their concrete types internally.
+  /// their concrete types internally. [responseAdapter] may return null for
+  /// optional `contentLength`, `requestId`, `region`, and `errorCode` fields.
   ///
   /// [rebuild] receives the original client and a [XRayWrapFn]. It must
   /// extract the client's underlying send function, pass it through [wrapSend],
@@ -80,8 +80,7 @@ abstract final class XRay {
     required SmithyResponseAdapter<Object> Function(Object) responseAdapter,
     required T Function(T original, XRayWrapFn wrapSend) rebuild,
   }) {
-    final resolvedNamespace =
-        namespace ?? awsServiceNamespaces[T.toString()] ?? 'aws';
+    final resolvedNamespace = _traceNamespace(namespace ?? 'aws');
     final resolvedExtractor =
         extractor ?? builtInExtractors[T.toString()] ?? defaultExtractor;
 
@@ -159,6 +158,12 @@ abstract final class XRay {
       createHttpClient: factory,
     );
   }
+}
+
+String _traceNamespace(String namespace) {
+  if (namespace == 'aws' || namespace == 'remote') return namespace;
+  if (namespace.startsWith('AWS::')) return 'aws';
+  return 'remote';
 }
 
 /// A base [HttpOverrides] whose `createHttpClient` returns the platform-default

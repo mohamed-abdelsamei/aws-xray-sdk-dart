@@ -2,8 +2,8 @@ import 'dart:io';
 
 import '../models/segment.dart';
 import '../models/trace_id.dart';
+import '../trace_header.dart';
 import '../tracer.dart';
-import '../wrappers/xray_interceptor.dart' show buildTraceHeader;
 
 /// Extracts X-Ray trace context from an incoming HTTP request's
 /// `X-Amzn-Trace-Id` header and runs [handler] inside [tracer.run].

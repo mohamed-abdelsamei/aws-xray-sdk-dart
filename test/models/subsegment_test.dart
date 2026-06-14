@@ -15,6 +15,13 @@ void main() {
       expect(s.endTime, isNotNull);
     });
 
+    test('close is idempotent', () {
+      final closed = Subsegment.begin(name: 'op', namespace: 'aws').close();
+      final closedAgain = closed.close();
+      expect(closedAgain.endTime, closed.endTime);
+      expect(closedAgain.inProgress, isFalse);
+    });
+
     test('applyStatus 5xx sets fault', () {
       final s = Subsegment.begin(name: 'op', namespace: 'aws').applyStatus(500);
       expect(s.fault, isTrue);

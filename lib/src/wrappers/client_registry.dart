@@ -27,7 +27,8 @@ final class ClientDescriptor<T extends Object> {
     required this.rebuild,
   });
 
-  /// X-Ray namespace string, e.g. `'dynamodb'`, `'s3'`.
+  /// X-Ray subsegment namespace (`aws` or `remote`). Values passed to
+  /// `XRay.registerClient` are normalized before storage.
   final String namespace;
 
   /// Extracts [AwsData] from a serialized Smithy request body.
@@ -44,11 +45,18 @@ final class ClientDescriptor<T extends Object> {
   /// ```
   final SmithyRequestAdapter<Object> Function(Object) requestAdapter;
 
-  /// Extracts HTTP status from a type-erased Smithy response object.
+  /// Extracts HTTP and AWS response metadata from a type-erased Smithy response
+  /// object.
   ///
   /// Consumers cast to the actual response type internally:
   /// ```dart
-  /// responseAdapter: (res) => (statusCode: (res as DynamoDbResponse).statusCode, contentLength: null),
+  /// responseAdapter: (res) => (
+  ///   statusCode: (res as DynamoDbResponse).statusCode,
+  ///   contentLength: null,
+  ///   requestId: res.requestId,
+  ///   region: null,
+  ///   errorCode: res.errorCode,
+  /// ),
   /// ```
   final SmithyResponseAdapter<Object> Function(Object) responseAdapter;
 

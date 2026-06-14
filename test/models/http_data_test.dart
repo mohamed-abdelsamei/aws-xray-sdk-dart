@@ -10,9 +10,18 @@ void main() {
       expect(json['url'], 'https://example.com');
     });
 
-    test('toJson contains only method and url', () {
+    test('toJson contains only method and url when traced is omitted', () {
       const req = HttpRequestData(method: 'POST', url: 'https://example.com');
       expect(req.toJson().keys, unorderedEquals(['method', 'url']));
+    });
+
+    test('toJson includes traced when set', () {
+      const req = HttpRequestData(
+        method: 'POST',
+        url: 'https://example.com',
+        traced: true,
+      );
+      expect(req.toJson()['traced'], isTrue);
     });
   });
 

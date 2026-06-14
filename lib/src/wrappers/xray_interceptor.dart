@@ -1,4 +1,9 @@
 import '../models/aws_data.dart';
+import '../models/cause.dart';
+import '../models/http_data.dart';
+import '../aws/region.dart';
+import '../aws/throttle_codes.dart';
+import '../trace_header.dart';
 import '../trace_suppression.dart';
 import '../tracer.dart';
 import 'resource_extractor.dart';
@@ -21,10 +26,17 @@ typedef SmithyRequestAdapter<Req> = ({
   Req Function(Req original, String traceHeader) withTraceHeader,
 });
 
-/// Extracts status code from a typed Smithy response.
+/// Extracts response metadata from a typed Smithy response.
+///
+/// [requestId] becomes `aws.request_id`, [region] becomes `aws.region`, and
+/// [errorCode] is used to identify AWS throttles that are returned with a
+/// non-429 HTTP status.
 typedef SmithyResponseAdapter<Res> = ({
   int statusCode,
   int? contentLength,
+  String? requestId,
+  String? region,
+  String? errorCode,
 });
 
 /// Wraps a Smithy [SendFn] with X-Ray tracing.
@@ -87,24 +99,46 @@ final class XRayInterceptor<Req, Res> {
                 url: adapted.url,
                 status: resAdapted.statusCode,
                 contentLength: resAdapted.contentLength,
+                traced: true,
               )
-              .withAws(awsData);
+              .withAws(AwsData(
+                operation: awsData.operation,
+                region: resAdapted.region ?? regionFromAwsUrl(adapted.url),
+                requestId: resAdapted.requestId,
+                tableName: awsData.tableName,
+                bucketName: awsData.bucketName,
+                keyId: awsData.keyId,
+                queueUrl: awsData.queueUrl,
+                topicArn: awsData.topicArn,
+                resourceNames: awsData.resourceNames,
+              ));
+          if (resAdapted.errorCode != null &&
+              isThrottleErrorCode(resAdapted.errorCode!)) {
+            sub = sub.withThrottle();
+          }
 
           _tracer.endSubsegment(sub);
           return response;
         } catch (e) {
-          _tracer.failSubsegment(sub.withAws(awsData), e);
+          var failed = sub
+              .withHttp(HttpData(
+                request: HttpRequestData(
+                  method: adapted.method,
+                  url: adapted.url,
+                  traced: true,
+                ),
+              ))
+              .withAws(awsData);
+          if (isThrottleErrorCode(e.runtimeType.toString()) ||
+              isThrottleErrorCode(e.toString())) {
+            failed = failed.withThrottle();
+            _tracer.endSubsegment(failed.withCause(Cause(exceptions: [
+              XRayException.from(e),
+            ])));
+          } else {
+            _tracer.failSubsegment(failed, e);
+          }
           rethrow;
         }
       };
 }
-
-/// Builds the `X-Amzn-Trace-Id` header value.
-///
-/// [traceId] is the string form of the root trace ID (`1-xxxx-xxxx`).
-String buildTraceHeader({
-  required String traceId,
-  required String segmentId,
-  required bool sampled,
-}) =>
-    'Root=$traceId;Parent=$segmentId;Sampled=${sampled ? 1 : 0}';

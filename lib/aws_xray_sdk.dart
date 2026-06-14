@@ -35,8 +35,6 @@ export 'src/models/cause.dart';
 // Sender
 export 'src/sender/sender.dart';
 export 'src/sender/udp_sender.dart';
-// HttpApiSender is not exported — SigV4 signing is not yet implemented.
-// Use UdpSender for all deployments.
 export 'src/sender/noop_sender.dart';
 
 // Sampling
@@ -45,13 +43,13 @@ export 'src/sampling/fixed_rate_sampler.dart';
 export 'src/sampling/reservoir_sampler.dart';
 
 // Wrappers (client registry + interceptor)
-export 'src/wrappers/client_registry.dart';
+export 'src/wrappers/client_registry.dart' show XRayWrapFn;
+export 'src/wrappers/resource_extractor.dart' show ResourceExtractor;
 export 'src/wrappers/xray_interceptor.dart'
-    show SmithyRequestAdapter, SmithyResponseAdapter, buildTraceHeader;
+    show SmithyRequestAdapter, SmithyResponseAdapter;
 
 // HTTP patch
 export 'src/http/xray_http_client.dart';
-export 'src/http/xray_http_overrides.dart';
 
 // HTTP client (package:http)
 export 'src/http/xray_base_client.dart';

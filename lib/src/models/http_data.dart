@@ -15,14 +15,17 @@ final class HttpRequestData {
   const HttpRequestData({
     required this.method,
     required this.url,
+    this.traced,
   });
 
   final String method;
   final String url;
+  final bool? traced;
 
   Map<String, Object?> toJson() => {
         'method': method,
         'url': url,
+        if (traced != null) 'traced': traced,
       };
 }
 

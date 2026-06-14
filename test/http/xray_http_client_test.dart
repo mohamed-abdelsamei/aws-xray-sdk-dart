@@ -208,6 +208,7 @@ void main() {
       final request = http['request'] as Map;
       expect(request['method'], 'GET');
       expect(request['url'], serverUri.toString());
+      expect(request['traced'], isTrue);
     });
 
     test('subsegment records HTTP response status code', () async {
@@ -256,6 +257,11 @@ void main() {
 
       final sub = sender.lastSubs.first as Map;
       expect(sub['fault'], isTrue);
+      final cause = sub['cause'] as Map;
+      final exc = (cause['exceptions'] as List).first as Map;
+      expect(exc['type'], 'HTTP 500');
+      expect(exc['message'], contains('500'));
+      expect(exc['remote'], isTrue);
     });
 
     test('4xx response marks subsegment as error', () async {
@@ -325,6 +331,8 @@ void main() {
       expect(sender.lastSubs, hasLength(1));
       final sub = sender.lastSubs.first as Map;
       expect(sub['fault'], isTrue);
+      final request = (sub['http'] as Map)['request'] as Map;
+      expect(request['traced'], isNull);
     });
 
     test('no subsegment created when there is no active segment', () async {
@@ -365,6 +373,7 @@ void main() {
       expect(sub['fault'], isTrue);
       final request = (sub['http'] as Map)['request'] as Map;
       expect(request['url'], 'https://127.0.0.1:1/secure');
+      expect(request['traced'], isNull);
     });
 
     test('a body stream that errors then completes records one subsegment',
@@ -414,6 +423,24 @@ void main() {
       // from handleError + endSubsegment from the following handleDone).
       expect(sender.lastSubs, hasLength(1));
       expect((sender.lastSubs.first as Map)['fault'], isTrue);
+    });
+
+    test('un-drained response is swept as one incomplete subsegment', () async {
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        final client = XRayHttpClient(HttpClient(), tracer);
+        final req = await client.openUrl('GET', serverUri);
+        final res = await req.close();
+        expect(res.statusCode, 200);
+        // Intentionally never drain res.
+        client.close();
+      });
+
+      expect(sender.lastSubs, hasLength(1));
+      final sub = sender.lastSubs.first as Map;
+      expect(((sub['metadata'] as Map)['xray'] as Map)['incomplete'], isTrue);
+      expect((sub['http'] as Map)['response']['status'], 200);
+      expect(sub['in_progress'], isNull);
     });
 
     test('non-AWS host gets remote namespace', () async {
