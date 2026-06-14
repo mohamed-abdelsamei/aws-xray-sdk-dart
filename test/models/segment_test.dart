@@ -46,5 +46,74 @@ void main() {
       final s = makeSegment().annotate('key', 'value');
       expect((s.annotations!['key']), 'value');
     });
+
+    test('annotate sanitizes a key with disallowed characters', () {
+      final s = makeSegment().annotate('order.id', 'A1');
+      expect(s.annotations!.containsKey('order.id'), isFalse);
+      expect(s.annotations!['order_id'], 'A1');
+    });
+
+    test('annotate coerces a non-scalar value to a string', () {
+      final s = makeSegment().annotate('items', [1, 2]);
+      expect(s.annotations!['items'], '[1, 2]');
+    });
+
+    test('annotate keeps scalar values (num/bool) as-is', () {
+      final s = makeSegment().annotate('count', 3).annotate('ok', true);
+      expect(s.annotations!['count'], 3);
+      expect(s.annotations!['ok'], true);
+    });
+
+    test('close is idempotent', () {
+      final s = makeSegment().close();
+      expect(s.close().endTime, s.endTime);
+    });
+
+    test('namespace is null by default', () {
+      expect(makeSegment().namespace, isNull);
+    });
+
+    test('namespace is settable via begin', () {
+      final s = Segment.begin(
+        name: 'svc',
+        traceId: traceId,
+        namespace: 'remote',
+      );
+      expect(s.namespace, 'remote');
+    });
+
+    test('namespace is null by default when not provided', () {
+      final s = Segment.begin(name: 'svc', traceId: traceId);
+      expect(s.namespace, isNull);
+    });
+
+    test('toJson omits namespace when null', () {
+      final json = makeSegment().close().toJson();
+      expect(json.containsKey('namespace'), isFalse);
+    });
+
+    test('toJson includes namespace when set', () {
+      final s = Segment.begin(
+        name: 'svc',
+        traceId: traceId,
+        namespace: 'aws',
+      ).close();
+      final json = s.toJson();
+      expect(json['namespace'], 'aws');
+    });
+
+    test('withFault with error records cause', () {
+      final s = makeSegment().withFault(Exception('crash'));
+      expect(s.fault, isTrue);
+      expect(s.cause, isNotNull);
+      expect(s.cause!.exceptions.first.message, contains('crash'));
+    });
+
+    test('withError with error records cause', () {
+      final s = makeSegment().withError(Exception('bad'));
+      expect(s.error, isTrue);
+      expect(s.cause, isNotNull);
+      expect(s.cause!.exceptions.first.message, contains('bad'));
+    });
   });
 }

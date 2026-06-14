@@ -20,16 +20,16 @@ import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 // Stub types — replace with the real Smithy client in your app.
 // ---------------------------------------------------------------------------
 
-typedef _SendFn<Req, Res> = Future<Res> Function(Req request);
+typedef SendFn<Req, Res> = Future<Res> Function(Req request);
 
-class _GetItemRequest {
-  const _GetItemRequest({required this.tableName, required this.key});
+class GetItemRequest {
+  const GetItemRequest({required this.tableName, required this.key});
   final String tableName;
   final Map<String, Object?> key;
 }
 
-class _GetItemResponse {
-  const _GetItemResponse({required this.statusCode, this.item});
+class GetItemResponse {
+  const GetItemResponse({required this.statusCode, this.item});
   final int statusCode;
   final Map<String, Object?>? item;
 }
@@ -40,24 +40,23 @@ class _GetItemResponse {
 /// via the `rebuild` callback in [XRay.registerClient].
 class StubDynamoDbClient {
   StubDynamoDbClient(
-      {required this.region,
-      _SendFn<_GetItemRequest, _GetItemResponse>? httpSend})
+      {required this.region, SendFn<GetItemRequest, GetItemResponse>? httpSend})
       : _send = httpSend ?? _defaultSend;
 
   final String region;
-  final _SendFn<_GetItemRequest, _GetItemResponse> _send;
+  final SendFn<GetItemRequest, GetItemResponse> _send;
 
-  Future<_GetItemResponse> getItem(_GetItemRequest request) => _send(request);
+  Future<GetItemResponse> getItem(GetItemRequest request) => _send(request);
 
   /// Returns a copy with a different internal send function — mirrors the
   /// real Smithy client's `copyWith(httpSend: ...)` pattern.
   StubDynamoDbClient copyWith(
-          {_SendFn<_GetItemRequest, _GetItemResponse>? httpSend}) =>
+          {SendFn<GetItemRequest, GetItemResponse>? httpSend}) =>
       StubDynamoDbClient(region: region, httpSend: httpSend);
 
-  static Future<_GetItemResponse> _defaultSend(_GetItemRequest req) async {
+  static Future<GetItemResponse> _defaultSend(GetItemRequest req) async {
     await Future.delayed(const Duration(milliseconds: 20)); // simulate network
-    return _GetItemResponse(
+    return GetItemResponse(
       statusCode: 200,
       item: {'id': req.key['id'], 'name': 'Alice'},
     );
@@ -79,8 +78,8 @@ void main() async {
   //   tracing metadata the SDK needs.  withTraceHeader is called by the
   //   interceptor to inject X-Amzn-Trace-Id into the outbound request.
   //
-  // responseAdapter: given the raw response, return statusCode and (optional)
-  //   contentLength for the HTTP subsegment.
+  // responseAdapter: given the raw response, return statusCode plus optional
+  //   contentLength, requestId, region, and AWS errorCode for the subsegment.
   //
   // rebuild: given the original client and a wrapSend function, extract the
   //   client's underlying send function, wrap it, and return a new client.
@@ -89,7 +88,7 @@ void main() async {
     // namespace defaults to 'aws' for unrecognised client types
     namespace: 'aws',
     requestAdapter: (req) {
-      final r = req as _GetItemRequest;
+      final r = req as GetItemRequest;
       return (
         operationName: 'GetItem',
         method: 'POST',
@@ -101,8 +100,14 @@ void main() async {
       );
     },
     responseAdapter: (res) {
-      final r = res as _GetItemResponse;
-      return (statusCode: r.statusCode, contentLength: null);
+      final r = res as GetItemResponse;
+      return (
+        statusCode: r.statusCode,
+        contentLength: null,
+        requestId: null,
+        region: 'us-east-1',
+        errorCode: null,
+      );
     },
     rebuild: (original, wrapSend) {
       // Extract the internal send function, wrap it, and install the
@@ -111,12 +116,12 @@ void main() async {
       // For the real Smithy DynamoDbClient this would be:
       //   final inner = (req) => original.rawSend(req as _RealRequest);
       //   return original.copyWith(httpSend: wrapSend(inner));
-      final inner = (req) => original.getItem(req as _GetItemRequest);
-      final wrapped = wrapSend(inner);
+      final wrapped =
+          wrapSend((req) => original.getItem(req as GetItemRequest));
       // wrapSend returns XRayHttpSendFn (Future<Object> Function(Object));
       // cast back to the concrete send type expected by copyWith.
       return original.copyWith(
-        httpSend: (req) async => await wrapped(req) as _GetItemResponse,
+        httpSend: (req) async => await wrapped(req) as GetItemResponse,
       );
     },
   );
@@ -137,7 +142,7 @@ void main() async {
     print('Trace: ${segment.traceId}');
 
     final response = await ddb.getItem(
-      _GetItemRequest(tableName: 'users', key: {'id': 'u-001'}),
+      GetItemRequest(tableName: 'users', key: {'id': 'u-001'}),
     );
     print('GetItem status=${response.statusCode} item=${response.item}');
   });

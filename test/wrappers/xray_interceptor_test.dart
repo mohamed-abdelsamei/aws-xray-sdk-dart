@@ -16,8 +16,21 @@ class _Req {
 }
 
 class _Res {
-  const _Res(this.statusCode);
+  const _Res(
+    this.statusCode, {
+    this.requestId,
+    this.region,
+    this.errorCode,
+  });
   final int statusCode;
+  final String? requestId;
+  final String? region;
+  final String? errorCode;
+}
+
+final class ProvisionedThroughputExceededException implements Exception {
+  @override
+  String toString() => 'ProvisionedThroughputExceededException: Rate exceeded';
 }
 // ---------------------------------------------------------------------------
 
@@ -56,6 +69,9 @@ XRayInterceptor<_Req, _Res> _makeInterceptor(XRayTracer tracer) =>
       responseAdapter: (res) => (
         statusCode: res.statusCode,
         contentLength: null,
+        requestId: res.requestId,
+        region: res.region,
+        errorCode: res.errorCode,
       ),
     );
 
@@ -126,6 +142,36 @@ void main() {
 
       final http = sender.firstSub['http'] as Map;
       expect((http['response'] as Map)['status'], 201);
+      expect((http['request'] as Map)['traced'], isTrue);
+    });
+
+    test('records aws request_id and adapter-provided region', () async {
+      final interceptor = _makeInterceptor(tracer);
+      final send = interceptor.wrap((_) async => const _Res(
+            200,
+            requestId: 'REQ-1',
+            region: 'eu-west-1',
+          ));
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment,
+          () => send(_Req(url: 'https://dynamodb.us-east-1.amazonaws.com')));
+
+      final aws = sender.firstSub['aws'] as Map;
+      expect(aws['request_id'], 'REQ-1');
+      expect(aws['region'], 'eu-west-1');
+    });
+
+    test('derives aws region from request url when adapter omits it', () async {
+      final interceptor = _makeInterceptor(tracer);
+      final send = interceptor.wrap((_) async => const _Res(200));
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment,
+          () => send(_Req(url: 'https://sqs.ap-southeast-2.amazonaws.com')));
+
+      final aws = sender.firstSub['aws'] as Map;
+      expect(aws['region'], 'ap-southeast-2');
     });
 
     test('sets fault=true on 5xx response', () async {
@@ -136,6 +182,26 @@ void main() {
       await tracer.run(segment, () => send(_Req(url: 'https://example.com')));
 
       expect(sender.firstSub['fault'], isTrue);
+      final cause = sender.firstSub['cause'] as Map;
+      final exception = (cause['exceptions'] as List).first as Map;
+      expect(exception['type'], 'HTTP 500');
+      expect(exception['message'], contains('500'));
+      expect(exception['remote'], isTrue);
+    });
+
+    test('sets throttle=true for AWS throttle error code on non-429 response',
+        () async {
+      final interceptor = _makeInterceptor(tracer);
+      final send = interceptor.wrap((_) async => const _Res(
+            400,
+            errorCode: 'ProvisionedThroughputExceededException',
+          ));
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () => send(_Req(url: 'https://example.com')));
+
+      expect(sender.firstSub['throttle'], isTrue);
+      expect(sender.firstSub['error'], isTrue);
     });
 
     test('sets throttle=true on 429 response', () async {
@@ -174,6 +240,28 @@ void main() {
       final cause = sender.firstSub['cause'] as Map;
       final exceptions = cause['exceptions'] as List;
       expect(exceptions.first['message'], contains('timeout'));
+      final http = sender.firstSub['http'] as Map;
+      expect((http['request'] as Map)['traced'], isTrue);
+    });
+
+    test('records thrown AWS throttle exception as throttle', () async {
+      final interceptor = _makeInterceptor(tracer);
+      final send = interceptor
+          .wrap((_) async => throw ProvisionedThroughputExceededException());
+
+      final segment = tracer.beginSegment();
+      await expectLater(
+        () => tracer.run(segment, () => send(_Req(url: 'https://example.com'))),
+        throwsA(isA<ProvisionedThroughputExceededException>()),
+      );
+
+      expect(sender.firstSub['throttle'], isTrue);
+      expect(sender.firstSub['error'], isTrue);
+      expect(sender.firstSub['fault'], isNull);
+      final exceptions =
+          (sender.firstSub['cause'] as Map)['exceptions'] as List;
+      expect(
+          exceptions.first['type'], 'ProvisionedThroughputExceededException');
     });
 
     test('subsegment is closed (no in_progress) after the call', () async {

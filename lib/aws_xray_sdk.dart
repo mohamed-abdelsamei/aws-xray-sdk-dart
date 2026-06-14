@@ -18,7 +18,7 @@
 ///   final result = await ddb.getItem(...);
 /// });
 /// ```
-library aws_xray_sdk;
+library;
 
 // Core
 export 'src/tracer.dart';
@@ -30,13 +30,11 @@ export 'src/models/segment.dart';
 export 'src/models/subsegment.dart';
 export 'src/models/http_data.dart';
 export 'src/models/aws_data.dart';
-export 'src/models/sql_data.dart';
 export 'src/models/cause.dart';
 
 // Sender
 export 'src/sender/sender.dart';
 export 'src/sender/udp_sender.dart';
-export 'src/sender/http_api_sender.dart';
 export 'src/sender/noop_sender.dart';
 
 // Sampling
@@ -45,10 +43,16 @@ export 'src/sampling/fixed_rate_sampler.dart';
 export 'src/sampling/reservoir_sampler.dart';
 
 // Wrappers (client registry + interceptor)
-export 'src/wrappers/client_registry.dart';
+export 'src/wrappers/client_registry.dart' show XRayWrapFn;
+export 'src/wrappers/resource_extractor.dart' show ResourceExtractor;
 export 'src/wrappers/xray_interceptor.dart'
-    show SmithyRequestAdapter, SmithyResponseAdapter, buildTraceHeader;
+    show SmithyRequestAdapter, SmithyResponseAdapter;
 
 // HTTP patch
 export 'src/http/xray_http_client.dart';
-export 'src/http/xray_http_overrides.dart';
+
+// HTTP client (package:http)
+export 'src/http/xray_base_client.dart';
+
+// Server middleware
+export 'src/http/xray_server_middleware.dart';

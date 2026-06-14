@@ -14,3 +14,8 @@ String randomHex(int length) {
 
 /// Returns the current time as seconds since the Unix epoch (floating-point).
 double nowSeconds() => DateTime.now().millisecondsSinceEpoch / 1000.0;
+
+/// Host suffix identifying an AWS endpoint (e.g.
+/// `dynamodb.us-east-1.amazonaws.com`). Shared by the `dart:io` and
+/// `package:http` clients for AWS host detection.
+const awsDomainSuffix = '.amazonaws.com';

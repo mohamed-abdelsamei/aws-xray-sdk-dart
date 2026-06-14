@@ -1,0 +1,41 @@
+version: 2
+
+updates:
+  # ── GitHub Actions ────────────────────────────────────────────────────────
+  # Keep workflow action versions current. Actions are pinned to floating major
+  # tags (e.g. @v4); Dependabot opens a PR when a new major is released.
+  # (To harden the supply chain, pin to commit SHAs instead — Dependabot keeps
+  # SHA-pinned actions updated too.)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: UTC
+    commit-message:
+      prefix: "build(actions)"
+    labels:
+      - dependencies
+      - github-actions
+    reviewers:
+      - mohamed-abdelsamei
+
+  # ── Dart / pub ────────────────────────────────────────────────────────────
+  # aws_xray_sdk has no runtime dependencies, but dev deps (lints, test)
+  # should stay current so CI tests reflect the latest tooling.
+  - package-ecosystem: pub
+    directory: /
+    schedule:
+      interval: monthly
+      time: "09:00"
+      timezone: UTC
+    commit-message:
+      prefix: "build(deps)"
+    labels:
+      - dependencies
+      - dart
+    reviewers:
+      - mohamed-abdelsamei
+    # Keep dev-only bumps out of the critical path — open as draft PRs.
+    open-pull-requests-limit: 5
