@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1
+
+### Documentation
+
+- Consolidated the two overlapping HTTP sections in the README into one
+  `HTTP tracing` section (`dart:io` patch, `package:http` client, response-body
+  lifecycle), added a contents nav, and removed a duplicate daemon-setup section.
+- Corrected the `AOT-safe` feature claim and dropped the misleading
+  `Flutter safe` label — the package uses `dart:io` and is not Flutter-web
+  compatible (matching `doc/tracing-behavior.md`).
+
 ## 0.2.0
 
 First release since `0.1.0`. Contains **breaking changes** (allowed pre-1.0).
