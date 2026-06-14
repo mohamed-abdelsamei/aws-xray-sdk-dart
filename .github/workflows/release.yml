@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout (full history for tag discovery)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -173,7 +173,7 @@ jobs:
         sdk: [stable, beta]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dart-lang/setup-dart@v1
         with:
@@ -216,7 +216,7 @@ jobs:
       id-token: write   # OIDC token for pub.dev automated publishing
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dart-lang/setup-dart@v1
         with:
