@@ -6,6 +6,20 @@ Traces outbound HTTP calls and AWS SDK operations, propagates the
 `X-Amzn-Trace-Id` header, and delivers completed segments to the X-Ray daemon
 via UDP — with first-class support for AWS Lambda custom runtimes.
 
+**Contents:**
+[Install](#installation) ·
+[Quick start](#quick-start) ·
+[HTTP tracing](#http-tracing) ·
+[`captureAsync`](#nested-subsegments--captureasync) ·
+[Manual subsegments](#manual-subsegments) ·
+[AWS SDK clients](#aws-sdk-client-wrapping) ·
+[Lambda](#lambda-integration) ·
+[Sampling](#sampling) ·
+[Sender options](#sender-options) ·
+[Schema](#segment-document-schema) ·
+[Architecture](#architecture) ·
+[Local dev](#local-development)
+
 ---
 
 ## Features
@@ -55,7 +69,13 @@ Future<void> processOrder(String orderId) {
 
 ---
 
-## HTTP auto-tracing
+## HTTP tracing
+
+Two ways to trace outbound HTTP, both injecting `X-Amzn-Trace-Id`, recording
+the request URL and response status, marking HTTP errors, and closing the
+subsegment when the response body stream finishes.
+
+### `dart:io` — global patch
 
 Call `XRay.patchHttp(tracer)` **once at startup**. Every `HttpClient` created
 afterwards — including those inside third-party packages that use
@@ -82,6 +102,27 @@ void main() async {
 ```
 
 To stop tracing: `XRay.unpatchHttp()`.
+
+### `package:http` — wrap a client
+
+Wrap any `package:http` `Client` with `XRayBaseClient`:
+
+```dart
+final client = XRayBaseClient(http.Client(), tracer);
+await tracer.run(segment, () => client.get(Uri.parse('https://api.example.com')));
+```
+
+`XRayBaseClient` injects the trace header into the `http.BaseRequest` it sends.
+Treat `package:http` request objects as single-use, as intended by the package;
+re-sending the same request instance can reuse the first attempt's `Parent=` id.
+
+### Response-body lifecycle
+
+If a response body is never drained, the SDK does **not** drop the span. At
+trace finalization it emits the subsegment once, closed, with
+`metadata.xray.incomplete = true` and the request/response fields known so far.
+This covers status-only callers, `HEAD`, and 204/304-style responses while still
+letting body-stream errors mark the span as faulted when the body is consumed.
 
 ---
 
@@ -157,22 +198,7 @@ The auto-instrumented HTTP clients are intentionally exempt: called outside a
 policy. `tracer.currentSegment` is also exempt — it is a side-effect-free getter
 that returns `null` to signal "no active trace".
 
-## Outbound HTTP Tracing
-
-Use `XRay.patchHttp(tracer)` for `dart:io` calls, or wrap a `package:http`
-client with `XRayBaseClient`. Both paths inject `X-Amzn-Trace-Id`, record the
-request URL and response status, mark HTTP errors, and close the subsegment when
-the response body stream finishes.
-
-If a response body is never drained, the SDK does not drop the span. At trace
-finalization it emits the subsegment once, closed, with
-`metadata.xray.incomplete = true` and the request/response fields known so far.
-This covers status-only callers, `HEAD`, and 204/304-style responses while still
-letting body-stream errors mark the span as faulted when the body is consumed.
-
-`XRayBaseClient` injects the trace header into the `http.BaseRequest` it sends.
-Treat `package:http` request objects as single-use, as intended by the package;
-re-sending the same request instance can reuse the first attempt's `Parent=` id.
+---
 
 ## Manual subsegments
 
@@ -569,22 +595,6 @@ XRayTracer.run / runLambda        Zone stores: Segment, TraceState (entity
 **Zone-based context** means you never pass the tracer or segment through
 function arguments. Any code that runs inside `tracer.run(…)` — including
 library code — can call `tracer.currentSegment` to get the active segment.
-
----
-
-## Running the X-Ray daemon locally
-
-```bash
-# Docker (recommended)
-docker run --rm -p 2000:2000/udp -p 2000:2000 \
-  amazon/aws-xray-daemon -o   # -o = no EC2 metadata lookup
-
-# macOS (Homebrew)
-brew install aws-xray-daemon && xray
-
-# View traces
-open https://console.aws.amazon.com/xray/home
-```
 
 ---
 
