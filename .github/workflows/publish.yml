@@ -1,0 +1,118 @@
+name: Publish to pub.dev
+
+# Publishes to pub.dev when a release tag (v1.2.3) is pushed.
+#
+# release.yml owns version computation and tagging (Phase 1) plus the test
+# matrix and GitHub Release. This workflow owns the pub.dev publish step,
+# using Dart's official reusable workflow (OIDC — no stored token).
+#
+# pub.dev automated publishing must be enabled for this to succeed:
+#   https://pub.dev/packages/aws_xray_sdk/admin
+#   Repository:  mohamed-abdelsamei/aws-xray-sdk-dart
+#   Tag pattern: v{{version}}
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  # Gate: the reusable publish workflow does not run tests, so verify the
+  # tagged commit on the full matrix before publishing.
+  test:
+    name: Test (Dart ${{ matrix.sdk }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [stable, beta]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+
+      - name: Cache pub dependencies
+        uses: actions/cache@v5
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-pub-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: ${{ runner.os }}-pub-
+
+      - run: dart pub get
+
+      - name: Verify formatting
+        if: matrix.sdk == 'stable'
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze
+        run: dart analyze --fatal-warnings
+
+      - name: Test
+        run: dart test --reporter=github
+
+  # Create the GitHub Release from the matching CHANGELOG section, after tests
+  # pass and before publishing to pub.dev.
+  github-release:
+    name: GitHub Release
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the Release
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify tag ↔ pubspec version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          PUBSPEC=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          if [ "$TAG" != "$PUBSPEC" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match pubspec version ${PUBSPEC}."
+            exit 1
+          fi
+          echo "✅ Tag ${GITHUB_REF_NAME} matches pubspec version ${PUBSPEC}."
+
+      - name: Detect pre-release
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES=$(awk -v v="$VERSION" '
+            $0 ~ "^## " v "( |$)" { found=1; next }
+            found && /^## /       { exit }
+            found                 { print }
+          ' CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            echo "::error file=CHANGELOG.md::No '## ${VERSION}' section found."
+            exit 1
+          fi
+          echo "$NOTES" > "$RUNNER_TEMP/release_notes.md"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ github.ref_name }}
+          name:       ${{ github.ref_name }}
+          body_path:  ${{ runner.temp }}/release_notes.md
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+
+  # Publish only after tests pass and the GitHub Release is created. Dart's
+  # reusable workflow provisions the OIDC token, runs its own publish dry-run,
+  # then publishes to pub.dev (no stored token).
+  publish:
+    needs: github-release
+    permissions:
+      id-token: write # OIDC authentication to pub.dev
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
