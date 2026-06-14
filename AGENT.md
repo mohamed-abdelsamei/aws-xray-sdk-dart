@@ -53,8 +53,10 @@ dart pub publish --dry-run
 lib/
   aws_xray_sdk.dart          # barrel export — public API surface
   src/
-    tracer.dart              # XRayTracer — Zone context, run(), runLambda(), sampling gate
-    xray.dart                # XRay facade — patchHttp(), fromClient<T>(), registerClient()
+    tracer.dart              # XRayTracer — Zone context, run(), runLambda(), captureAsync(), annotate(), subsegment API
+    xray.dart                # XRay facade — patchHttp(), fromClient<T>(), registerClient(), untracedHttpClient()
+    trace_scope.dart         # TraceScope / TraceContext — live mutable entity tree, serialized at close
+    trace_suppression.dart   # runWithoutDartIoTracing() — prevents double-tracing under patchHttp
     utils.dart               # randomHex(), nowSeconds()
     models/
       segment.dart           # Segment (immutable value object)
@@ -63,18 +65,21 @@ lib/
       cause.dart             # Cause + XRayException
       http_data.dart         # HttpData, HttpRequestData, HttpResponseData
       aws_data.dart          # AwsData — operation, tableName, bucketName, …
+      annotation.dart        # annotation key/value sanitize + coerce helpers
     sampling/
       sampling_strategy.dart # SamplingRequest, SamplingStrategy interface
       fixed_rate_sampler.dart
-      reservoir_sampler.dart
+      reservoir_sampler.dart  # injectable clock for deterministic tests
     sender/
       sender.dart            # Sender abstract class (send, close, sendPackets)
-      udp_sender.dart        # UdpSender — fire-and-forget UDP, IPv4/IPv6 aware
+      udp_sender.dart        # UdpSender — fire-and-forget UDP, resolve/bind once, onError hook
       noop_sender.dart       # NoopSender — discards all (tests / local dev)
-      segment_encoder.dart   # encode() — 64 KB split logic
+      segment_encoder.dart   # encode(), encodeSubsegmentDoc() — 64 KB split logic
     http/
       xray_http_client.dart  # XRayHttpClient — wraps dart:io HttpClient
       xray_http_overrides.dart # global dart:io patch
+      xray_base_client.dart  # XRayBaseClient — wraps package:http BaseClient
+      xray_server_middleware.dart # handleTraced() — dart:io HttpServer request tracing
     wrappers/
       xray_interceptor.dart  # XRayInterceptor<Req,Res>, adapter records
       client_registry.dart   # internal descriptor registry, XRayWrapFn
@@ -84,13 +89,14 @@ lib/
       throttle_codes.dart    # AWS throttling error-code detection
     trace_header.dart        # X-Amzn-Trace-Id formatter
 test/                        # mirrors lib/src/ structure
-example/                     # pub.dev examples (9 files + README.md)
+example/                     # pub.dev examples (10 files + README.md)
 scripts/
   run-daemon.sh              # start X-Ray daemon via Docker with SSO creds
 .github/
   workflows/
-    ci.yml                   # push/PR: format + analyze + test (stable + beta)
-    release.yml              # tag v*.*.*: verify version, GitHub Release, pub publish
+    ci.yml                   # push/PR to main: format + analyze + test (stable + beta)
+    commitlint.yml           # PR: Conventional Commit title check
+    publish.yml              # tag v*.*.*: test -> GitHub Release -> pub publish (OIDC)
 ```
 
 ---
@@ -100,11 +106,16 @@ scripts/
 ### Data flow — standalone
 
 1. `tracer.run(segment, fn)` makes the sampling decision **once**, stores
-   `Segment` and `bool sampled` in a Dart `Zone`.
-2. Inside `fn`, HTTP calls go through `XRayHttpClient` (auto via
-   `XRay.patchHttp`) or `XRayInterceptor` (Smithy clients via
-   `XRay.fromClient<T>()`). Each opens a subsegment, injects
-   `X-Amzn-Trace-Id`, awaits, then closes the subsegment.
+   `Segment`, `TraceState`, the current `TraceScope`, and `bool sampled` in a
+   Dart `Zone`.
+2. Inside `fn`, outbound calls go through one of three paths, each opening a
+   subsegment, injecting `X-Amzn-Trace-Id`, awaiting, then closing it:
+   `XRayHttpClient` (dart:io, auto via `XRay.patchHttp`), `XRayBaseClient`
+   (package:http), or `XRayInterceptor` (Smithy clients via
+   `XRay.fromClient<T>()`). `captureAsync(name, fn)` groups them under a named
+   nested subsegment. Higher-level wrappers run their inner send through
+   `runWithoutDartIoTracing` so a patched dart:io client underneath does not
+   trace the same request twice.
 3. On completion the segment is JSON-serialised, wrapped with
    `{"format":"json","version":1}\n`, and fired as a UDP datagram to the
    X-Ray daemon (`127.0.0.1:2000` by default).
@@ -128,12 +139,25 @@ Using the env var produces orphaned subsegments in a separate trace.
 
 ### Zone-based context
 
-`XRayTracer.run()` stores two values in the Zone:
-- `_segmentKey` → the active `Segment` (mutable via `addSubsegment`, etc.)
+`XRayTracer.run()` / `runLambda()` store four values in the Zone:
+- `_zoneKey` → the active `Segment` (read by `currentSegment`, used for header injection)
+- `_stateKey` → the `TraceState` (root scope + the pending-subsegment registry)
+- `_currentScopeKey` → the current `TraceScope` (the root, or a `captureAsync` child)
 - `_sampledKey` → `bool` sampling decision
 
-Any code running inside `tracer.run(…)` can read `tracer.currentSegment`
-without any explicit parameter threading.
+Runtime trace data accumulates in a mutable `TraceScope` tree (`trace_scope.dart`);
+the immutable `Segment` / `Subsegment` documents are produced when each scope
+closes. `captureAsync(name, fn)` forks a child scope in a child `Zone`, so nested
+and concurrent captures stay independent. Any code running inside `tracer.run(…)`
+can read `tracer.currentSegment` without any explicit parameter threading.
+
+### Undrained-response sweep
+
+A subsegment opened by `beginSubsegment` (HTTP clients) closes when its response
+body stream finishes. If a caller never drains the body, the close never fires —
+so at finalization `TraceState.sweep()` closes any still-open span once, flags it
+`metadata.xray.incomplete = true`, and attaches it to its parent. A `closedIds`
+set keeps a late body-stream close after a sweep from double-attaching.
 
 ### Segment size limit
 
@@ -150,8 +174,9 @@ document per child subsegment.
 | **UDP-first** | Fire-and-forget; no ACK, no retry. PutTraceSegments HTTP API delivery is not shipped until SigV4 signing is implemented. |
 | **Immutable models** | `Segment` / `Subsegment` are value objects; every mutation returns a copy. No shared-state races. |
 | **Sampling at entry** | `shouldSample()` called once at `run()` entry; result stored in Zone and read by `closeSegment()` and both interceptors. Prevents orphaned child traces. |
-| **No `dart:mirrors`** | AOT / Flutter safe. No `build_runner` step. |
-| **`abstract class Sender`** | Not `abstract interface class` — concrete `sendPackets()` default lives here so sub-classes don't break. |
+| **Tracing never faults the app** | Sender / serialization failures during finalization are swallowed in `run` / `runLambda` / `closeSegment` / `close`. `UdpSender.onError` surfaces local failures without throwing. |
+| **No `dart:mirrors`** | AOT-safe; compiles with `dart compile exe`. No `build_runner` step. Uses `dart:io`, so not Flutter-web compatible. |
+| **`abstract class Sender`** | Not `abstract interface class`: a concrete `sendPackets()` default lives here so sub-classes don't break. |
 
 ---
 
@@ -218,16 +243,22 @@ See `demos/lambda_dart_runtime/` for a fully deployable CDK example.
 ## CI / release
 
 - **CI** (`ci.yml`): runs on every push/PR to `main`. Matrix: Dart stable + beta.
-  Steps: format check → `dart analyze --fatal-warnings` → `dart test`.
-- **Release** (`release.yml`): triggers on `v*.*.*` tags.
-  Verifies tag matches `pubspec.yaml` version, creates a GitHub Release from
-  `CHANGELOG.md`, then runs `dart pub publish --force` via OIDC
-  (no stored token — requires pub.dev automated publishing setup).
+  Steps: format check, `dart analyze --fatal-warnings`, `dart test`, publish dry-run.
+- **Commit lint** (`commitlint.yml`): validates PR titles as Conventional Commits.
+- **Publish** (`publish.yml`): triggers on a `v*.*.*` tag. Jobs run in order
+  `test` (stable + beta) -> `github-release` (verify tag matches `pubspec.yaml`,
+  create the Release from the matching `CHANGELOG.md` section) -> `publish`
+  (Dart's reusable `dart-lang/setup-dart/.github/workflows/publish.yml@v1`,
+  via OIDC, no stored token). Requires pub.dev automated publishing enabled
+  for the repo with tag pattern `v{{version}}`.
 
-To release:
+Releases are tagged manually, never by CI (a tag pushed with `GITHUB_TOKEN`
+cannot trigger a workflow, so there is no auto-tag bot). To release: bump
+`pubspec.yaml`, add a matching `## X.Y.Z` section to `CHANGELOG.md`, merge to
+`main`, then tag a commit that already contains `publish.yml`:
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag -a vX.Y.Z -m "Release X.Y.Z"
+git push origin vX.Y.Z
 ```
 
 ---
@@ -240,3 +271,4 @@ git push origin v0.1.0
 - `dart analyze --fatal-warnings` must pass clean — enforced in CI.
 - `pubspec.lock` is gitignored (library, not an app).
 - One runtime dependency: `http` (for `XRayBaseClient`); otherwise only `dart:io` / `dart:convert` / `dart:async`.
+- Releases are tagged manually on a commit that already contains `publish.yml`; CI never creates tags.
