@@ -16,15 +16,22 @@ validation, and a dead-code cleanup.
   - `Cause.workingDirectory` (never populated).
   - `Segment.service`, `Segment.http`, and `Segment.aws` (structurally always
     null — `Segment` exposed no way to set them).
-  - The unused helpers `namespaceForClient` and `namespaceFor<T>` (use the
-    `awsServiceNamespaces` map directly).
-- **`HttpApiSender` is no longer exported** from the package barrel — SigV4
-  signing is not yet implemented; use `UdpSender` (the default) for all
-  deployments.
+  - The unused helpers `namespaceForClient` and `namespaceFor<T>`.
+- **`HttpApiSender` was removed** — SigV4 signing is not yet implemented; use
+  `UdpSender` (the default) for all deployments.
+- **The stale `awsServiceNamespaces` map was removed** — Smithy client
+  registration now defaults directly to the valid X-Ray namespace `aws`.
+- **Registry internals are no longer exported** from the package barrel. Use
+  `XRay.registerClient` / `XRay.fromClient`; direct access to `clientRegistry`,
+  `descriptorFor`, and `ClientDescriptor` was an implementation detail.
 - **Annotation values are now sanitized.** `annotate` keeps the same signature
   but no longer stores arbitrary keys/values verbatim (see *Annotation
   validation* below) — a caller relying on invalid keys/values reaching X-Ray
   unchanged will see different output.
+- **`SmithyResponseAdapter` now returns AWS response metadata.** Adapter records
+  must include nullable `requestId`, `region`, and `errorCode` fields in addition
+  to `statusCode` and `contentLength`. This lets `XRay.fromClient` populate
+  `aws.request_id`, `aws.region`, and AWS throttling flags.
 
 ### New features
 
@@ -45,6 +52,8 @@ validation, and a dead-code cleanup.
 **`package:http` and server-side tracing**
 - `XRayBaseClient` wraps a `package:http` `BaseClient`, tracing each request with
   the same subsegment + AWS metadata extraction as the `dart:io` path.
+- HTTP instrumentation now sets `http.request.traced = true` when the SDK injects
+  `X-Amzn-Trace-Id`, allowing downstream service-to-service linkage in X-Ray.
 - `handleTraced(request, tracer, handler)` — `dart:io` `HttpServer` middleware
   that continues an incoming `X-Amzn-Trace-Id`, runs the handler in a trace zone,
   and injects the trace header into the response for downstream propagation.
@@ -56,6 +65,19 @@ validation, and a dead-code cleanup.
   `runWithoutDartIoTracing` (a zone flag); `XRayHttpClient` stands down when it is
   set. A request passing through both a wrapper and a `patchHttp`-patched
   `dart:io` client is now traced exactly once.
+- Smithy client namespaces are normalized to X-Ray schema values (`aws` or
+  `remote`) so custom or `AWS::...` registration values cannot produce invalid
+  subsegment namespaces.
+
+**AWS trace fidelity**
+- Smithy client wrappers record `aws.request_id` when the response adapter
+  supplies it and record `aws.region` from the adapter or request URL.
+- AWS throttles are detected from known AWS error codes such as
+  `ProvisionedThroughputExceededException`, `ThrottlingException`,
+  `RequestLimitExceeded`, `TooManyRequestsException`, and `SlowDown`, not only
+  from HTTP `429`.
+- Error-status responses that do not throw now synthesize a remote HTTP `cause`
+  so 4xx/5xx subsegments have diagnostic detail.
 
 **Transport & sampling**
 - `UdpSender` gained an optional `onError(Object)` callback (silent by default)
@@ -90,12 +112,17 @@ validation, and a dead-code cleanup.
 - **`XRayHttpClient` double-recorded a subsegment** when a response body stream
   errored then completed (consumed with `cancelOnError: false`). The fault path
   and the done path are now mutually exclusive.
+- **Undrained HTTP responses no longer drop spans.** If an instrumented
+  `dart:io` or `package:http` response body is never consumed, trace finalization
+  emits the subsegment once with `metadata.xray.incomplete = true` and the
+  request/response data known so far.
+- **Manual subsegment close is idempotent.** Re-closing a subsegment, including a
+  late close after an incomplete-response sweep, records the first outcome once.
 - **`handleTraced` reported the wrong `Sampled=` flag.** The response header's
   sampling flag was read after the trace zone closed (fail-open `true`), so it
   always emitted `Sampled=1`; it now reports the real decision.
 - `Segment.withFault(err)` / `Segment.withError(err)` record exceptions directly
   on segments (previously only `Subsegment` supported this).
-- `Segment.aws` is typed as `AwsData?` instead of raw `Map<String, Object>?`.
 - `Segment.close()` is idempotent — calling it on an already-closed segment
   preserves the original timing.
 - `XRayHttpClient` preserves the request scheme for host/port overloads
@@ -113,8 +140,9 @@ validation, and a dead-code cleanup.
   `nowSeconds()` timing, nested children, fault capture) instead of a hand-built
   document.
 - Extracted `_runZoned` in `tracer.dart` (shared by `run`/`runLambda`); reused
-  `encodeSubsegmentDoc` in the encoder's oversize-split path; collapsed the
-  `HttpApiSender` stub; de-duplicated the HTTP-metadata and trace-header builders.
+  `encodeSubsegmentDoc` in the encoder's oversize-split path; removed the
+  unimplemented HTTP API sender stub; de-duplicated HTTP metadata, AWS region,
+  throttle-code, and trace-header helpers.
 
 ### Documentation & tests
 
@@ -122,6 +150,9 @@ validation, and a dead-code cleanup.
   options, local sampler semantics + no-centralized-fallback behavior, the
   double-trace suppression model, and the Lambda subsegment contract (README +
   `doc/architecture.md`).
+- Documented the HTTP tracing lifecycle, including incomplete spans for
+  undrained responses and the single-use request expectation for
+  `XRayBaseClient`.
 - Added a `Segment` / `Subsegment` JSON golden test and broad coverage for the
   HTTP clients, `runLambda`, transport containment, `UdpSender` robustness,
   annotation validation, `handleTraced`, and the resource extractors.
@@ -140,7 +171,6 @@ Initial release.
 - `UdpSender` — fire-and-forget UDP to the X-Ray daemon (IPv4 / IPv6, 64 KB split)
 - `encodeSubsegmentDoc` — encode an independent subsegment document for Lambda
 - `NoopSender` for tests and local development
-- `HttpApiSender` stub (pending SigV4 signing)
 
 ### HTTP instrumentation
 - `XRayHttpClient` wraps `dart:io` `HttpClient`; auto-traces every request

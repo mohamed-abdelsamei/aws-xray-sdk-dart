@@ -68,5 +68,5 @@ failures (network unreachable, message too large, bind/resolve failure) — neve
 
 ## Scope
 
-In: `UdpSender` only. Out: the `Sender` interface, `SegmentEncoder`,
-`HttpApiSender`, datagram retry/buffering (remains fire-and-forget).
+In: `UdpSender` only. Out: the `Sender` interface, `SegmentEncoder`, HTTP API
+delivery, datagram retry/buffering (remains fire-and-forget).

@@ -10,6 +10,9 @@ The `aws_xray_sdk_dart` package provides distributed tracing support for Dart ap
 - Lambda `provided:al2023` subsegment support,
 - pluggable sampling and UDP delivery to the X-Ray daemon.
 
+For exact runtime contracts and edge-case behavior, see
+[`tracing-behavior.md`](tracing-behavior.md).
+
 ## Core components
 
 ### Public API
@@ -54,16 +57,24 @@ The `aws_xray_sdk_dart` package provides distributed tracing support for Dart ap
 - Every new `HttpClient` created after patching is wrapped by `XRayHttpClient`.
 - `XRayHttpClient`:
   - opens a subsegment for each outbound request,
-  - injects `X-Amzn-Trace-Id`,
+  - injects `X-Amzn-Trace-Id` and records `http.request.traced = true` on
+    completed response paths,
   - records request/response metadata,
   - closes subsegments after the body is fully consumed,
-  - marks failures as faulted.
+  - emits an `metadata.xray.incomplete = true` subsegment at trace finalization
+    if the response body is never consumed,
+  - marks failures as faulted and synthesizes a remote HTTP cause for error
+    status responses that do not throw.
 
 ### package:http tracing
 
 - `XRayBaseClient` wraps `http.BaseClient` from `package:http`.
 - It provides the same tracing behavior as `dart:io` tracing with AWS-specific metadata extraction for AWS hosts.
 - AWS requests receive `aws` namespace handling and resource naming for service map visibility.
+- AWS response metadata includes `aws.request_id`, derived `aws.region`, resource
+  names, AWS error causes, and AWS throttle detection by error code.
+- `XRayBaseClient` mutates the `http.BaseRequest` it sends to inject
+  `X-Amzn-Trace-Id`; callers should treat request instances as single-use.
 
 ### Avoiding double instrumentation
 
@@ -84,10 +95,13 @@ The `aws_xray_sdk_dart` package provides distributed tracing support for Dart ap
 - The SDK avoids a hard dependency on concrete AWS SDK types.
 - Clients are registered with `XRay.registerClient<T>` using:
   - `requestAdapter` to extract operation metadata and inject trace headers,
-  - `responseAdapter` to extract status and content length,
+  - `responseAdapter` to extract status, content length, request id, region, and
+    optional AWS error code,
   - `rebuild` to reconstruct a new wrapped client instance.
 - `XRay.fromClient<T>(client, tracer)` uses `XRayInterceptor` to wrap the underlying send function.
 - This adapter-based registry enables tracing of arbitrary Smithy-based AWS clients while keeping the package lightweight.
+- Registered namespaces are normalized to valid X-Ray subsegment namespaces:
+  `aws` for AWS clients and `remote` for other downstream clients.
 
 ## Lambda integration
 
@@ -116,14 +130,21 @@ The `aws_xray_sdk_dart` package provides distributed tracing support for Dart ap
 - Subsegments, annotations, and metadata accumulate on the current scope and are serialized onto the immutable `Segment` / `Subsegment` documents only when the scope closes — immutability is preserved at the serialization boundary, mutability is confined to the open scope.
 - Annotations are validated at every entry point (`annotation.dart`): keys are sanitized to X-Ray's `[A-Za-z0-9_]` set and non-scalar values are coerced to strings (sanitize, never throw). Metadata is unvalidated (any JSON-serializable value) by design.
 - `beginSubsegment` captures its parent scope in a per-trace registry keyed by id, so `endSubsegment` attaches it to the correct parent even when begin and end happen in different zones (e.g. an HTTP response body consumed after the request returns).
+- The same registry stores latest-known open subsegment documents so finalization
+  can close undrained HTTP spans once, mark them incomplete, and avoid duplicate
+  attachment if a late close arrives later.
 - Because each scope is zone-bound, concurrent `captureAsync` branches (e.g. under `Future.wait`) accumulate independently — no shared "current entity" pointer to corrupt.
 
 ## Error handling and reliability
 
-- All subsegments are closed in `finally` blocks so traces are emitted even when exceptions occur.
+- All subsegments are closed in `finally` blocks or finalization sweeps so traces
+  are emitted even when exceptions occur or response bodies are not consumed.
 - `failSubsegment` records faulted spans and retains request metadata when transport or response errors happen.
+- Closing a subsegment is idempotent; a second close or a late close after an
+  incomplete sweep does not duplicate the id or overwrite the first outcome.
 - Segment delivery is conditional on the sampling decision.
-- `UdpSender` logs UDP send failures but does not retry.
+- Sender failures are contained at the tracer boundary; `UdpSender` is silent by
+  default and exposes an optional `onError` callback for local transport errors.
 
 ## Supported runtime constraints
 
@@ -140,7 +161,7 @@ Application
    │      ├─ active zone context
    │      ├─ sampling decision
    │      ├─ segment close/send
-   │      └─ subsegment list
+   │      └─ TraceScope tree + pending subsegment registry
    ├─> XRay.patchHttp(tracer)
    │      └─ HttpOverrides.global = XRayHttpOverrides
    │            └─ XRayHttpClient wraps HttpClient
@@ -150,7 +171,7 @@ Application
           └─ XRayInterceptor.wrap(innerSend)
 
 XRayHttpClient / XRayBaseClient / XRayInterceptor
-   └─ create subsegment -> inject X-Amzn-Trace-Id -> await response -> close or fail
+   └─ create subsegment -> inject X-Amzn-Trace-Id -> await response -> close, sweep, or fail
 
 XRayTracer.closeSegment(segment)
    └─ UdpSender.send(segment)
@@ -158,3 +179,29 @@ XRayTracer.closeSegment(segment)
              └─ payload bytes -> UDP datagram -> X-Ray daemon
 ```
 
+## Runtime Flow Diagram
+
+```mermaid
+flowchart TD
+  App[Application code] --> Run[XRayTracer.run or runLambda]
+  Run --> Zone[Trace Zone]
+  Zone --> Scope[TraceScope tree]
+  Zone --> State[TraceState pending registry]
+  App --> HTTP[Outbound HTTP/AWS call]
+  HTTP --> Wrap{Instrumentation path}
+  Wrap --> IO[XRayHttpClient]
+  Wrap --> Base[XRayBaseClient]
+  Wrap --> Smithy[XRayInterceptor]
+  Base --> Suppress[runWithoutDartIoTracing]
+  Smithy --> Suppress
+  Suppress --> Inner[Inner dart:io transport stands down]
+  IO --> Pending[Pending subsegment updated]
+  Base --> Pending
+  Smithy --> Pending
+  Pending --> Close{Body/call completes?}
+  Close -->|yes| Attach[Attach closed subsegment once]
+  Close -->|no| Sweep[Finalization sweep marks incomplete]
+  Attach --> Encode[SegmentEncoder]
+  Sweep --> Encode
+  Encode --> Sender[UdpSender or custom Sender]
+```

@@ -157,6 +157,23 @@ The auto-instrumented HTTP clients are intentionally exempt: called outside a
 policy. `tracer.currentSegment` is also exempt — it is a side-effect-free getter
 that returns `null` to signal "no active trace".
 
+## Outbound HTTP Tracing
+
+Use `XRay.patchHttp(tracer)` for `dart:io` calls, or wrap a `package:http`
+client with `XRayBaseClient`. Both paths inject `X-Amzn-Trace-Id`, record the
+request URL and response status, mark HTTP errors, and close the subsegment when
+the response body stream finishes.
+
+If a response body is never drained, the SDK does not drop the span. At trace
+finalization it emits the subsegment once, closed, with
+`metadata.xray.incomplete = true` and the request/response fields known so far.
+This covers status-only callers, `HEAD`, and 204/304-style responses while still
+letting body-stream errors mark the span as faulted when the body is consumed.
+
+`XRayBaseClient` injects the trace header into the `http.BaseRequest` it sends.
+Treat `package:http` request objects as single-use, as intended by the package;
+re-sending the same request instance can reuse the first attempt's `Parent=` id.
+
 ## Manual subsegments
 
 For flat, sibling subsegments (or when begin and end straddle a callback), use
@@ -212,7 +229,16 @@ XRay.registerClient<DynamoDbClient>(
           original.rebuild(headers: {...original.headers, 'X-Amzn-Trace-Id': header}),
     );
   },
-  responseAdapter: (res) => (statusCode: (res as DdbRes).statusCode, contentLength: null),
+  responseAdapter: (res) {
+    final r = res as DdbRes;
+    return (
+      statusCode: r.statusCode,
+      contentLength: null,
+      requestId: r.requestId,
+      region: null,     // omitted here: derived from the request URL when possible
+      errorCode: null,  // set for modeled AWS throttle/error responses if available
+    );
+  },
   rebuild: (client, wrapSend) {
     final inner = (req) => client.rawSend(req as DdbReq);
     return client.copyWith(httpSend: wrapSend(inner));
@@ -223,6 +249,18 @@ XRay.registerClient<DynamoDbClient>(
 final ddb = XRay.fromClient(DynamoDbClient(...), tracer: tracer);
 await ddb.getItem(...);  // subsegment created automatically
 ```
+
+The response adapter fields map directly to X-Ray metadata:
+
+- `requestId` becomes `aws.request_id`, the primary AWS support correlation key.
+- `region` becomes `aws.region`; if omitted, the SDK derives it from standard
+  regional AWS hosts such as `dynamodb.us-east-1.amazonaws.com`.
+- `errorCode` is used to mark AWS throttles even when the HTTP status is not
+  `429`.
+
+Registered client namespaces are normalized to X-Ray schema values. Use `aws`
+for AWS service clients and `remote` for other downstream clients; legacy
+`AWS::...` values are treated as `aws`.
 
 > See [`example/aws_sdk_tracing.dart`](example/aws_sdk_tracing.dart) for a
 > complete, runnable version with a stub client.
@@ -420,7 +458,9 @@ authoritative, and `GetSamplingRules` / `GetSamplingTargets` are not consulted
 | `UdpSender` (default) | Fire-and-forget UDP to the X-Ray daemon (`127.0.0.1:2000`) |
 | `NoopSender` | Discards all segments; useful for tests and local dev |
 
-> **Note:** `HttpApiSender` (PutTraceSegments HTTP API) is not exported — SigV4 request signing is not yet implemented. Use `UdpSender` for all deployments.
+> **Note:** The package currently sends traces through the X-Ray daemon protocol
+> (`UdpSender`). The PutTraceSegments HTTP API path is not shipped because SigV4
+> signing is not implemented.
 
 ```dart
 // Tests — discard all segments
@@ -574,7 +614,6 @@ lib/
     sender/
       sender.dart                # Sender abstract class  (send, close, sendPackets)
       udp_sender.dart            # UdpSender     — fire-and-forget UDP
-      http_api_sender.dart       # HttpApiSender — not exported; stub pending SigV4
       noop_sender.dart           # NoopSender    — discard (tests / dev)
       segment_encoder.dart       # encode(), encodeSubsegmentDoc()
     http/
@@ -583,10 +622,13 @@ lib/
       xray_base_client.dart      # XRayBaseClient — wraps package:http BaseClient
       xray_server_middleware.dart# handleTraced() — dart:io HttpServer request tracing
     wrappers/
-      xray_interceptor.dart      # XRayInterceptor<Req,Res>, buildTraceHeader()
-      client_registry.dart       # ClientDescriptor, clientRegistry
+      xray_interceptor.dart      # XRayInterceptor<Req,Res>, adapter records
+      client_registry.dart       # internal descriptor registry
       resource_extractor.dart    # ResourceExtractor — DDB/S3/KMS/SQS/SNS
-      aws_service_names.dart     # client type → X-Ray namespace string
+    aws/
+      region.dart                # AWS endpoint region parsing
+      throttle_codes.dart        # AWS throttling error-code detection
+    trace_header.dart            # X-Amzn-Trace-Id formatter
 ```
 
 ---
@@ -597,7 +639,7 @@ lib/
 
 | Item | File | Notes |
 |---|---|---|
-| `HttpApiSender` SigV4 signing | `sender/http_api_sender.dart` | Throws `UnimplementedError`; class is not exported. Implement AWS SigV4 request signing to enable the PutTraceSegments HTTP API path. |
+| PutTraceSegments HTTP API sender | new sender module | Implement AWS SigV4 request signing to enable daemon-less delivery. |
 
 ### Planned features
 

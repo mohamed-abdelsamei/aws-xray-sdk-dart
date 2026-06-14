@@ -71,16 +71,18 @@ lib/
       sender.dart            # Sender abstract class (send, close, sendPackets)
       udp_sender.dart        # UdpSender — fire-and-forget UDP, IPv4/IPv6 aware
       noop_sender.dart       # NoopSender — discards all (tests / local dev)
-      http_api_sender.dart   # HttpApiSender — stub; send() throws UnimplementedError
       segment_encoder.dart   # encode() — 64 KB split logic
     http/
       xray_http_client.dart  # XRayHttpClient — wraps dart:io HttpClient
       xray_http_overrides.dart # global dart:io patch
     wrappers/
-      xray_interceptor.dart  # XRayInterceptor<Req,Res>, buildTraceHeader()
-      client_registry.dart   # ClientDescriptor, clientRegistry, XRayWrapFn
+      xray_interceptor.dart  # XRayInterceptor<Req,Res>, adapter records
+      client_registry.dart   # internal descriptor registry, XRayWrapFn
       resource_extractor.dart# ResourceExtractor — DDB/S3/KMS/SQS/SNS
-      aws_service_names.dart # client type → X-Ray namespace string
+    aws/
+      region.dart            # AWS endpoint region parsing
+      throttle_codes.dart    # AWS throttling error-code detection
+    trace_header.dart        # X-Amzn-Trace-Id formatter
 test/                        # mirrors lib/src/ structure
 example/                     # pub.dev examples (9 files + README.md)
 scripts/
@@ -145,7 +147,7 @@ document per child subsegment.
 
 | Decision | Rationale |
 |---|---|
-| **UDP-first** | Fire-and-forget; no ACK, no retry. `HttpApiSender` is a stub (SigV4 not implemented) — never use in production. |
+| **UDP-first** | Fire-and-forget; no ACK, no retry. PutTraceSegments HTTP API delivery is not shipped until SigV4 signing is implemented. |
 | **Immutable models** | `Segment` / `Subsegment` are value objects; every mutation returns a copy. No shared-state races. |
 | **Sampling at entry** | `shouldSample()` called once at `run()` entry; result stored in Zone and read by `closeSegment()` and both interceptors. Prevents orphaned child traces. |
 | **No `dart:mirrors`** | AOT / Flutter safe. No `build_runner` step. |
@@ -173,7 +175,15 @@ e.g. 1-5759e988-bd862e3fe1be46a994272793
 // 1. Register once at cold-start
 XRay.registerClient<DynamoDbClient>(
   requestAdapter: (req) { ... return (operationName:, method:, url:, resource:); },
-  responseAdapter: (res) => (statusCode:, contentLength:),
+  responseAdapter: (res) => (
+    statusCode:,
+    contentLength:,
+    requestId:,
+    region:,
+    errorCode:,
+  ),
+  // requestId -> aws.request_id; region -> aws.region; errorCode drives AWS
+  // throttle detection for non-429 responses.
   rebuild: (client, wrapSend) {
     final inner = (req) => client.rawSend(req as DdbReq);
     return client.copyWith(httpSend: wrapSend(inner));

@@ -45,4 +45,4 @@ local/
 # but guard against accidental leaks from the package root)
 cdk.context.json
 cdk.out/
-.co-agents
+.coagents

@@ -78,8 +78,8 @@ void main() async {
   //   tracing metadata the SDK needs.  withTraceHeader is called by the
   //   interceptor to inject X-Amzn-Trace-Id into the outbound request.
   //
-  // responseAdapter: given the raw response, return statusCode and (optional)
-  //   contentLength for the HTTP subsegment.
+  // responseAdapter: given the raw response, return statusCode plus optional
+  //   contentLength, requestId, region, and AWS errorCode for the subsegment.
   //
   // rebuild: given the original client and a wrapSend function, extract the
   //   client's underlying send function, wrap it, and return a new client.
@@ -101,7 +101,13 @@ void main() async {
     },
     responseAdapter: (res) {
       final r = res as GetItemResponse;
-      return (statusCode: r.statusCode, contentLength: null);
+      return (
+        statusCode: r.statusCode,
+        contentLength: null,
+        requestId: null,
+        region: 'us-east-1',
+        errorCode: null,
+      );
     },
     rebuild: (original, wrapSend) {
       // Extract the internal send function, wrap it, and install the
