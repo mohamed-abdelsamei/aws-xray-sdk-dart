@@ -20,13 +20,11 @@ List<List<int>> encode(Segment segment) {
   final result = <List<int>>[_encodeOne(skeleton)];
 
   for (final sub in segment.subsegments) {
-    final subDoc = {
-      ...sub.toJson(),
-      'type': 'subsegment',
-      'parent_id': segment.id,
-      'trace_id': segment.traceId.toString(),
-    };
-    result.add(_encodeOne(subDoc));
+    result.add(encodeSubsegmentDoc(
+      sub.toJson(),
+      segment.id,
+      segment.traceId.toString(),
+    ));
   }
 
   return result;

@@ -10,26 +10,18 @@ void main() {
       expect(json['url'], 'https://example.com');
     });
 
-    test('toJson omits optional null fields', () {
+    test('toJson contains only method and url when traced is omitted', () {
       const req = HttpRequestData(method: 'POST', url: 'https://example.com');
-      final json = req.toJson();
-      expect(json.containsKey('user_agent'), isFalse);
-      expect(json.containsKey('client_ip'), isFalse);
-      expect(json.containsKey('x_forwarded_for'), isFalse);
+      expect(req.toJson().keys, unorderedEquals(['method', 'url']));
     });
 
-    test('toJson includes optional fields when set', () {
+    test('toJson includes traced when set', () {
       const req = HttpRequestData(
-        method: 'GET',
+        method: 'POST',
         url: 'https://example.com',
-        userAgent: 'dart/3.0',
-        clientIp: '1.2.3.4',
-        xForwardedFor: true,
+        traced: true,
       );
-      final json = req.toJson();
-      expect(json['user_agent'], 'dart/3.0');
-      expect(json['client_ip'], '1.2.3.4');
-      expect(json['x_forwarded_for'], isTrue);
+      expect(req.toJson()['traced'], isTrue);
     });
   });
 

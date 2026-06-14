@@ -9,6 +9,9 @@
 //   - marks the subsegment as fault/error when the request fails
 //
 // namespace is 'remote' for general hosts, 'aws' for *.amazonaws.com hosts.
+//
+// Prerequisite: run the X-Ray daemon locally (Docker):
+//   docker run --rm -p 2000:2000/udp amazon/aws-xray-daemon:3.x -o -n us-east-1
 
 import 'dart:io';
 
@@ -17,7 +20,7 @@ import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 void main() async {
   final tracer = XRayTracer(
     serviceName: 'http-demo',
-    sender: NoopSender(), // swap for UdpSender() to see traces in X-Ray
+    sender: UdpSender(),
     sampling: FixedRateSampler(1.0),
   );
 

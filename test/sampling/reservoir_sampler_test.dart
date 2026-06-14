@@ -1,6 +1,17 @@
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 import 'package:test/test.dart';
 
+/// A fake clock that returns a fixed [DateTime] and can be advanced.
+final class _FakeClock {
+  _FakeClock(this._now);
+
+  DateTime _now;
+
+  DateTime call() => _now;
+
+  void advance(Duration d) => _now = _now.add(d);
+}
+
 void main() {
   const req = SamplingRequest(
     serviceName: 'svc',
@@ -15,34 +26,31 @@ void main() {
       for (var i = 0; i < 5; i++) {
         if (sampler.shouldSample(req)) sampled++;
       }
-      // All 5 should be within the reservoir
       expect(sampled, 5);
     });
 
     test('applies fixedRate above reservoir within one second', () {
-      // Fill reservoir then check that requests above it follow the rate.
       final sampler = ReservoirSampler(reservoirSize: 2, fixedRate: 0.0);
-      // Drain the reservoir.
       sampler.shouldSample(req);
       sampler.shouldSample(req);
-      // Now above reservoir with rate=0 — none should be sampled.
       for (var i = 0; i < 20; i++) {
         expect(sampler.shouldSample(req), isFalse);
       }
     });
 
-    test('reservoir resets each second', () async {
-      final sampler = ReservoirSampler(reservoirSize: 1, fixedRate: 0.0);
-      // Drain the reservoir in the first "second" (mocked via internal clock).
-      expect(sampler.shouldSample(req), isTrue);
-      expect(sampler.shouldSample(req), isFalse); // above reservoir, rate=0
+    test('reservoir resets each second', () {
+      final clock = _FakeClock(DateTime.utc(2024, 1, 1));
+      final sampler = ReservoirSampler(
+        reservoirSize: 1,
+        fixedRate: 0.0,
+        now: clock.call,
+      );
+      expect(sampler.shouldSample(req), isTrue); // second 1, reservoir used
+      expect(sampler.shouldSample(req), isFalse); // second 1, above reservoir
 
-      // Wait for the second to roll over.
-      await Future.delayed(const Duration(seconds: 1));
-
-      // Reservoir resets — first request in new second is sampled again.
-      expect(sampler.shouldSample(req), isTrue);
-    }, timeout: const Timeout(Duration(seconds: 3)));
+      clock.advance(const Duration(seconds: 1));
+      expect(sampler.shouldSample(req), isTrue); // second 2, reservoir reset
+    });
 
     test('reservoirSize=0 falls through to fixedRate', () {
       final always = ReservoirSampler(reservoirSize: 0, fixedRate: 1.0);

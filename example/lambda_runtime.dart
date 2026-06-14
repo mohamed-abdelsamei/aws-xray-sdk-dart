@@ -1,222 +1,172 @@
-// Example: AWS Lambda custom runtime with X-Ray tracing.
+// Example: AWS Lambda handler with X-Ray tracing.
 //
-// Demonstrates the complete cold-start setup and per-invocation tracing
-// pattern for a Dart Lambda using the provided:al2023 base image.
+// Runs a simulated Lambda invocation locally — no daemon required.
+// The traced segment document is printed to stdout for inspection.
 //
 // KEY POINTS
 //
-// 1. Use XRayTracer.runLambda() instead of run().
-//    provided:al2023 automatically creates and sends an AWS::Lambda::Function
-//    segment.  If the SDK also sends a top-level segment, the daemon receives
-//    two competing segments and silently drops ours.
-//    runLambda() emits an independent *subsegment document* parented to
+// 1. Use runLambda() instead of run().
+//    provided:al2023 automatically creates a top-level AWS::Lambda::Function
+//    segment.  If the SDK also sends one, the daemon silently drops ours.
+//    runLambda() emits an independent subsegment document parented to
 //    Lambda's auto-created segment, so both appear correctly in X-Ray.
 //
-// 2. Read AWS_XRAY_DAEMON_ADDRESS at runtime.
-//    Lambda injects the daemon address via this env var.  Newer Lambda
-//    environments use 169.254.100.1:2000 (link-local), NOT 127.0.0.1:2000.
-//    Hardcoding the address causes all UDP packets to be silently dropped.
+// 2. Read AWS_XRAY_DAEMON_ADDRESS at cold start.
+//    Lambda injects this env var.  Newer runtimes use 169.254.100.1:2000
+//    (link-local), NOT 127.0.0.1:2000.
 //
 // 3. Call XRay.patchHttp() exactly once at cold start.
-//    Calling it twice wraps XRayHttpClient inside itself, producing duplicate
-//    subsegments for every outbound HTTP request.
+//    Double-patching wraps XRayHttpClient inside itself, producing
+//    duplicate subsegments for every outbound HTTP request.
 //
 // RESULTING X-RAY TRACE
 //
 //   AWS::Lambda (facade)                    [auto]
-//     AWS::Lambda::Function                 [auto — id from Parent= in header]
+//     AWS::Lambda::Function                 [auto — id from Parent= header]
 //       Overhead                            [auto]
-//       <function-name>                     ← our handler subsegment ✓
-//         parse-input                       ← manual subsegment
-//         jsonplaceholder.typicode.com      ← auto-traced, namespace=remote
-//
-// HOW TO BUILD AND DEPLOY
-//
-//   # From the workspace root (xray_client/)
-//   docker build -f demos/lambda/Dockerfile -t xray-lambda-demo .
-//   # Push to ECR and update the Lambda function image, or use CDK/SAM.
+//       my-function                         ← runLambda() subsegment ✓
+//         validate-input                    ← manual subsegment, namespace=aws
+//         jsonplaceholder.typicode.com      ← auto-traced HTTP, namespace=remote
+//         DynamoDB                          ← XRayBaseClient, namespace=aws,
+//                                             operation=PutItem (traced once)
 
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
+import 'package:http/http.dart' as http;
 
-// ── Cold-start helpers ────────────────────────────────────────────────────────
+// ── Run locally ──────────────────────────────────────────────────────────────
 
-/// Parses the X-Ray daemon address from AWS_XRAY_DAEMON_ADDRESS.
-///
-/// Lambda injects this env var.  The format is `host:port`.
-/// Falls back to 127.0.0.1:2000 when running outside Lambda.
-(String host, int port) _daemonAddress() {
+void main() async {
+  // Use NoopSender for local runs — swap for UdpSender() when deploying.
+  await coldStart(sender: NoopSender());
+
+  final event = {
+    'pathParameters': {'userId': '1'},
+  };
+
+  // Simulate the Lambda-Runtime-Trace-Id header that API Gateway would send.
+  final header =
+      'Root=${TraceId.generate()};Parent=${_fakeParentId()};Sampled=1';
+
+  final result = await handleInvocation(event, header);
+  print('Result: ${result['statusCode']}');
+}
+
+String _fakeParentId() {
+  // Generate a realistic 16-hex-char segment id.
+  final bytes =
+      List<int>.generate(8, (_) => DateTime.now().microsecondsSinceEpoch % 256);
+  return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+// ── Cold start (runs once per sandbox lifetime) ──────────────────────────────
+
+late final XRayTracer _tracer;
+
+Future<void> coldStart({Sender? sender}) async {
   final raw =
       Platform.environment['AWS_XRAY_DAEMON_ADDRESS'] ?? '127.0.0.1:2000';
   final colon = raw.lastIndexOf(':');
-  if (colon == -1) return (raw, 2000);
-  return (
-    raw.substring(0, colon),
-    int.tryParse(raw.substring(colon + 1)) ?? 2000
-  );
-}
+  final host = colon == -1 ? raw : raw.substring(0, colon);
+  final port = int.tryParse(raw.substring(colon + 1)) ?? 2000;
 
-// ── Cold start ────────────────────────────────────────────────────────────────
-//
-// Everything here runs once per Lambda sandbox lifetime.
-
-Future<void> main() async {
-  // 1. Initialise the X-Ray tracer with the correct daemon address.
-  final (host, port) = _daemonAddress();
-  final tracer = XRayTracer(
+  _tracer = XRayTracer(
     serviceName:
         Platform.environment['AWS_LAMBDA_FUNCTION_NAME'] ?? 'my-function',
-    sender: UdpSender(host: host, port: port),
-    // Lambda has already decided sampling (Sampled= in the trace header).
-    // Always forward to the local daemon at rate 1.0; the daemon enforces it.
+    sender: sender ?? UdpSender(host: host, port: port),
     sampling: FixedRateSampler(1.0),
   );
 
-  stderr.writeln('[cold-start] tracer daemon=$host:$port');
-
-  // 2. Patch dart:io ONCE so every HttpClient is automatically traced.
-  XRay.patchHttp(tracer);
-
-  // 3. Start the Lambda Runtime API event loop.
-  final runtimeApi =
-      Platform.environment['AWS_LAMBDA_RUNTIME_API'] ?? 'localhost:9001';
-  final client = HttpClient(); // not traced — created before runLambda zone
-
-  while (true) {
-    // ── Poll for next invocation ────────────────────────────────────────────
-    final nextReq = await client.getUrl(
-        Uri.parse('http://$runtimeApi/2018-06-01/runtime/invocation/next'));
-    final nextRes = await nextReq.close();
-
-    final requestId =
-        nextRes.headers.value('lambda-runtime-aws-request-id') ?? '';
-    final rawHeader = nextRes.headers.value('lambda-runtime-trace-id') ?? '';
-    // deadlineMs available for timeout enforcement if needed:
-    // int.tryParse(nextRes.headers.value('lambda-runtime-deadline-ms') ?? '')
-
-    final event =
-        jsonDecode(await utf8.decodeStream(nextRes)) as Map<String, Object?>? ??
-            const {};
-
-    stderr.writeln('[invoke] requestId=$requestId traceHeader=$rawHeader');
-
-    // ── Parse the Lambda-Runtime-Trace-Id header ────────────────────────────
-    // Root=   → the X-Ray trace ID for this invocation
-    // Parent= → the id of the auto-created AWS::Lambda::Function segment
-    // Sampled=1/0 → Lambda's sampling decision
-    final traceId = TraceId.tryParse(rawHeader) ?? TraceId.generate();
-    final parentId = TraceId.parseParentId(rawHeader);
-    final sampled = TraceId.parseSampled(rawHeader) ?? true;
-
-    // ── Handle + trace ──────────────────────────────────────────────────────
-    try {
-      final result = parentId != null
-          // Normal Lambda execution: emit a subsegment document parented to
-          // the auto-created AWS::Lambda::Function segment (id = parentId).
-          ? await tracer.runLambda(
-              traceId,
-              parentId,
-              tracer.serviceName,
-              () => _handleEvent(event, tracer),
-              sampled: sampled,
-            )
-          // Fallback for local testing (no Lambda runtime context).
-          : await tracer.run(
-              Segment.begin(
-                name: tracer.serviceName,
-                traceId: traceId,
-                origin: 'AWS::Lambda::Function',
-              ),
-              () => _handleEvent(event, tracer),
-            );
-
-      // ── Post success response ─────────────────────────────────────────────
-      final resReq = await client.postUrl(
-        Uri.parse(
-            'http://$runtimeApi/2018-06-01/runtime/invocation/$requestId/response'),
-      );
-      resReq.headers.contentType = ContentType.json;
-      final resBody = utf8.encode(jsonEncode(result));
-      resReq.contentLength = resBody.length;
-      resReq.add(resBody);
-      await resReq.close();
-    } catch (e, st) {
-      // ── Post error response ───────────────────────────────────────────────
-      stderr.writeln('[invoke] error: $e\n$st');
-      final errReq = await client.postUrl(
-        Uri.parse(
-            'http://$runtimeApi/2018-06-01/runtime/invocation/$requestId/error'),
-      );
-      errReq.headers
-        ..set('Lambda-Runtime-Function-Error-Type', 'Runtime.${e.runtimeType}')
-        ..contentType = ContentType.json;
-      final errBody = utf8.encode(jsonEncode({
-        'errorMessage': e.toString(),
-        'errorType': e.runtimeType.toString(),
-      }));
-      errReq.contentLength = errBody.length;
-      errReq.add(errBody);
-      await errReq.close();
-    }
-  }
+  XRay.patchHttp(_tracer);
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
+// ── Per-invocation handler ──────────────────────────────────────────────────
 
-/// Processes an API Gateway proxy event and returns a proxy response.
-///
-/// The two subsegments produced here appear in X-Ray under the handler
-/// subsegment emitted by runLambda():
-///
-///   <function-name>
-///     parse-input       ← manual subsegment
-///     jsonplaceholder…  ← auto-traced HTTP, namespace=remote
-Future<Map<String, Object?>> _handleEvent(
+Future<Map<String, Object?>> handleInvocation(
   Map<String, Object?> event,
-  XRayTracer tracer,
+  String traceHeader,
 ) async {
-  // ── 1. Parse input (manual subsegment) ────────────────────────────────────
-  final inputSub = tracer.beginSubsegment('parse-input');
-  final String? userId;
+  final traceId = TraceId.tryParse(traceHeader) ?? TraceId.generate();
+  final parentId = TraceId.parseParentId(traceHeader);
+  final sampled = TraceId.parseSampled(traceHeader) ?? true;
+
+  return _tracer.runLambda(
+    traceId,
+    // The header may have no Parent= (a trace originating at this service, or a
+    // direct/test invocation); runLambda accepts an empty parent id.
+    parentId ?? '',
+    _tracer.serviceName,
+    () => _handler(event),
+    sampled: sampled,
+  );
+}
+
+// ── Business logic ──────────────────────────────────────────────────────────
+
+Future<Map<String, Object?>> _handler(Map<String, Object?> event) async {
+  // ── 1. Custom subsegment: validate input ──────────────────────────────────
+  final sub = _tracer.beginSubsegment('validate-input', namespace: 'aws');
+  final userId = switch (event['pathParameters']) {
+    {'userId': final String uid} => uid,
+    _ => null,
+  };
+  if (userId == null) {
+    _tracer.failSubsegment(sub, 'missing userId');
+    return {'statusCode': 400, 'body': '{"error":"missing userId"}'};
+  }
+  _tracer.endSubsegment(sub.addMetadata('userId', userId));
+
+  // ── 2. HTTP call to external API (auto-traced, namespace=remote) ───────────
+  final user = await _fetchUser(userId);
+
+  // ── 3. DynamoDB PutItem call (traced once, namespace=aws) ──────────────────
+  //
+  // patchHttp() is active, so this http.Client() is backed by an
+  // XRayHttpClient. XRayBaseClient automatically suppresses that inner patch
+  // for the duration of the send, so the request is traced exactly once (the
+  // rich AWS subsegment below), not duplicated as a bare host-named one.
+  final client = XRayBaseClient(http.Client(), _tracer);
   try {
-    final params = event['pathParameters'] as Map<String, Object?>?;
-    userId = params?['userId'] as String?;
-    if (userId == null) {
-      tracer.failSubsegment(inputSub, 'missing pathParameters.userId');
-      return _apiResponse(400, body: {'error': 'missing userId'});
+    final body = utf8.encode(jsonEncode({
+      'TableName': 'users',
+      'Item': {
+        'userId': {'S': userId},
+        'name': {'S': user['name'] ?? ''},
+      },
+    }));
+    final res = await client.post(
+      Uri.parse('https://dynamodb.us-east-1.amazonaws.com'),
+      headers: {
+        'X-Amz-Target': 'DynamoDB_20120810.PutItem',
+        'Content-Type': 'application/x-amz-json-1.0',
+      },
+      body: body,
+    );
+    if (res.statusCode != 200) {
+      return {
+        'statusCode': 502,
+        'body': '{"error":"DynamoDB returned ${res.statusCode}"}',
+      };
     }
-    tracer.endSubsegment(inputSub.addMetadata('userId', userId));
-  } catch (e) {
-    tracer.failSubsegment(inputSub, e);
-    rethrow;
+  } finally {
+    client.close();
   }
 
-  // ── 2. Upstream HTTP call (auto-traced by XRayHttpClient) ─────────────────
-  // No manual subsegment needed — XRay.patchHttp() already intercepts this.
-  // The subsegment is named 'jsonplaceholder.typicode.com', namespace='remote'.
-  // If the host were *.amazonaws.com the namespace would be 'aws' automatically.
+  return {'statusCode': 200, 'body': jsonEncode(user)};
+}
+
+Future<Map<String, Object?>> _fetchUser(String userId) async {
+  final url = Uri.parse('https://jsonplaceholder.typicode.com/users/$userId');
   final httpClient = HttpClient();
   try {
-    final uri = Uri.parse('https://jsonplaceholder.typicode.com/users/$userId');
-    final req = await httpClient.getUrl(uri);
+    final req = await httpClient.getUrl(url);
     final res = await req.close();
-    if (res.statusCode == 404) {
-      return _apiResponse(404, body: {'error': 'user $userId not found'});
-    }
     final body =
         jsonDecode(await utf8.decodeStream(res)) as Map<String, Object?>;
-    return _apiResponse(200, body: body);
+    return body;
   } finally {
     httpClient.close();
   }
 }
-
-Map<String, Object?> _apiResponse(int status,
-        {required Map<String, Object?> body}) =>
-    {
-      'statusCode': status,
-      'headers': {'Content-Type': 'application/json'},
-      'body': jsonEncode(body),
-    };

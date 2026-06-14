@@ -7,3 +7,6 @@ analyzer:
     missing_return: error
     unused_import: error
     unused_local_variable: error
+
+    # Tests that validate internal behaviour import from src/ directly.
+    implementation_imports: ignore

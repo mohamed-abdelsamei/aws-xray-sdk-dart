@@ -74,7 +74,7 @@ Future<void> _validatePayment(int amountCents) async {
 }
 
 Future<void> _persistToDatabase(String orderId, int amountCents) async {
-  // In a real app you'd also annotate the SQL subsegment with SqlData.
+  // In a real app you'd annotate the subsegment with the DB call's metadata.
   await Future.delayed(const Duration(milliseconds: 20));
   print('  Persisted: $orderId = \$${amountCents / 100}');
 }
