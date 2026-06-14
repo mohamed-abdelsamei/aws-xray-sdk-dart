@@ -18,7 +18,7 @@ via UDP — with first-class support for AWS Lambda custom runtimes.
 | 📡 **UDP-first transport** | Fire-and-forget to the X-Ray daemon; reads `AWS_XRAY_DAEMON_ADDRESS` automatically |
 | 🎛️ **Flexible sampling** | Fixed-rate and reservoir samplers; pluggable `SamplingStrategy` interface |
 | 🔒 **Zone-based context** | Sampling decision and active segment flow across `await` chains with no manual threading |
-| 🧊 **AOT / Flutter safe** | Zero `dart:mirrors`; no `build_runner` step |
+| 🧊 **AOT-safe** | Zero `dart:mirrors`; no `build_runner` step — compiles with `dart compile exe` |
 
 ---
 
