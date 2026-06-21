@@ -220,6 +220,12 @@ final class XRayTracer {
   /// would actually be lost; see [endSubsegment] / [failSubsegment].
   Segment? get currentSegment => Zone.current[_zoneKey] as Segment?;
 
+  /// The [TraceId] of the active segment, or `null` if no trace is active.
+  ///
+  /// Convenience inside a [run] or [runLambda] callback so callers can write
+  /// `tracer.currentTraceId` instead of `tracer.currentSegment?.traceId`.
+  TraceId? get currentTraceId => currentSegment?.traceId;
+
   /// Applies [contextMissingPolicy] when a subsegment is recorded but there is
   /// no active trace in the current zone to attach it to (so the data would be
   /// silently dropped).
