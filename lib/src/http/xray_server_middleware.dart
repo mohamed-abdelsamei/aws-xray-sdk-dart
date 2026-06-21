@@ -34,30 +34,25 @@ Future<T> handleTraced<T>(
     parentId: parentId,
   );
 
-  // Captured inside the run zone where tracer.isSampled reflects the real
-  // decision. Read in the finally block — after run() returns — the getter
-  // would be outside the zone and fail open to `true`, mislabelling the
-  // outgoing header as Sampled=1 for unsampled traces.
-  var sampled = true;
-  try {
-    return await tracer.run(segment, () async {
-      sampled = tracer.isSampled;
-      return await handler();
-    });
-  } finally {
-    // Attempt to set the trace-id header on the response so downstream
-    // services can continue the trace. The response may already have been
-    // closed by the handler — in that case headers are immutable and the
-    // set throws; we swallow the error.
+  return tracer.run(segment, () async {
     try {
-      request.response.headers.set(
-        'x-amzn-trace-id',
-        buildTraceHeader(
-          traceId: segment.traceId.toString(),
-          segmentId: segment.id,
-          sampled: sampled,
-        ),
-      );
-    } catch (_) {}
-  }
+      return await handler();
+    } finally {
+      // Read tracer.isSampled inside the zone so it reflects the real
+      // decision (outside a zone the getter would fail open to `true`,
+      // mislabelling the header as Sampled=1 for unsampled traces).
+      // The response may already have been closed — headers are immutable
+      // and the set throws; we swallow the error.
+      try {
+        request.response.headers.set(
+          'x-amzn-trace-id',
+          buildTraceHeader(
+            traceId: segment.traceId.toString(),
+            segmentId: segment.id,
+            sampled: tracer.isSampled,
+          ),
+        );
+      } catch (_) {}
+    }
+  });
 }

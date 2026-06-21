@@ -324,6 +324,10 @@ final class XRayBaseClient extends http.BaseClient {
     );
   }
 
+  // TODO: Replace regex with proper XML parsing. The current approach is
+  // fragile — it breaks on namespaces, CDATA sections, and encoding quirks.
+  // AWS query-protocol error bodies are simple enough for now, but this will
+  // need hardening for broader XML coverage.
   static String? _xmlTag(String xml, String tag) {
     final match = RegExp('<$tag>(.*?)</$tag>', dotAll: true).firstMatch(xml);
     return match?.group(1)?.trim();
