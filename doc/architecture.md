@@ -32,7 +32,11 @@ For exact runtime contracts and edge-case behavior, see
   - facade for integration helpers.
   - `patchHttp(tracer)` and `unpatchHttp()` for global `dart:io` HTTP patching.
   - `untracedHttpClient()` to build an unwrapped transport when tracing should be avoided.
+  - `httpClientFor(tracer)` to wrap a `package:http` client (for `aws_client` / `aws_*_api`).
   - `registerClient` / `fromClient` for Smithy AWS SDK client wrapping.
+
+- `LambdaTraceCapture`
+  - captures the `Lambda-Runtime-Trace-Id` header for custom Lambda runtimes and exposes a parsed `LambdaTraceContext` for `runLambda`.
 
 ### Models
 
@@ -77,6 +81,11 @@ For exact runtime contracts and edge-case behavior, see
   names, AWS error causes, and AWS throttle detection by error code.
 - `XRayBaseClient` mutates the `http.BaseRequest` it sends to inject
   `X-Amzn-Trace-Id`; callers should treat request instances as single-use.
+- `XRay.httpClientFor(tracer, {inner})` is a convenience that wraps an
+  `http.Client` with `XRayBaseClient` — the supported path for tracing
+  `package:http`-based AWS SDKs (`aws_client` / the agilord `aws_*_api`
+  packages) that accept an `http.Client`. AWS-aware naming and resource
+  extraction apply automatically for `*.amazonaws.com` hosts.
 
 ### Avoiding double instrumentation
 
@@ -111,6 +120,7 @@ For exact runtime contracts and edge-case behavior, see
 - Instead of emitting a top-level segment, it emits an independent subsegment document parented to Lambda's auto-created function segment.
 - `encodeSubsegmentDoc` injects `type: subsegment`, `parent_id`, and `trace_id` required by X-Ray.
 - This avoids competing with the Lambda runtime's root segment and preserves trace linkage.
+- `LambdaTraceCapture` captures the `Lambda-Runtime-Trace-Id` header (the authoritative trace id for Lambda's auto-created segment) by overriding the global `package:http` client for a zone via `http.runWithClient`. Its `context()` returns a parsed `LambdaTraceContext` (`traceId`, `parentId`, `sampled`) to pass to `runLambda` — a capture path that needs no runtime fork. The runtime-specific handler glue stays with the caller, since it depends on the chosen runtime package. **Do not** use the `_X_AMZN_TRACE_ID` env var (it carries the incoming request's trace, breaking parent→child linkage).
 
 ## Incoming request tracing
 
