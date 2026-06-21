@@ -97,6 +97,19 @@ void main() {
       expect(header, contains('Root=$upstreamTrace'));
     });
 
+    test('records request and response http data on the segment', () async {
+      await serveAndCapture(rate: 1.0);
+
+      final http = sender.last['http'] as Map<String, Object?>;
+      final request = http['request'] as Map<String, Object?>;
+      final response = http['response'] as Map<String, Object?>;
+
+      expect(request['method'], 'GET');
+      expect(request['url'], contains('/orders'));
+      expect(request['traced'], true);
+      expect(response['status'], 200);
+    });
+
     test('runs the handler inside an active trace zone', () async {
       Segment? captured;
       final upstreamTrace = TraceId.generate();

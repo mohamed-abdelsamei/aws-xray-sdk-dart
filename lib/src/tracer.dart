@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'models/http_data.dart';
 import 'models/segment.dart';
 import 'models/subsegment.dart';
 import 'models/trace_id.dart';
@@ -386,6 +387,21 @@ final class XRayTracer {
         state.pending.remove(sub.id)?.parent ?? _currentScope ?? state.root;
     parent.addChild(sub);
     state.closedIds.add(sub.id);
+  }
+
+  /// Records HTTP request/response data on the **root segment** of the current
+  /// trace (not on any nested [captureAsync] scope).
+  ///
+  /// Intended for the server middleware, which knows the incoming request and
+  /// outgoing response. Folded onto the segment when it is finalized. A no-op
+  /// outside a [run] zone.
+  void recordSegmentHttp(HttpData http) {
+    final state = Zone.current[_stateKey] as TraceState?;
+    if (state == null) {
+      _handleContextMissing();
+      return;
+    }
+    state.root.setHttp(http);
   }
 
   /// Whether the current zone's trace is being sampled.
