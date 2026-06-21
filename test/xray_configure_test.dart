@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
+import 'package:http/http.dart' as http;
 import 'package:test/test.dart';
 
 class _RecordingSender extends Sender {
@@ -106,6 +107,28 @@ void main() {
         // xray_base_client_test.dart).
       });
       expect(sender.sent, hasLength(1));
+    });
+
+    test('XRayBaseClient(inner) zero-arg resolves the global default tracer',
+        () async {
+      final sender = _RecordingSender();
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'svc',
+          sender: sender,
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      // No explicit tracer passed -> must bind to the configured global one.
+      final client = XRayBaseClient(http.Client());
+      expect(client, isA<XRayBaseClient>());
+
+      final tracer = XRay.tracer;
+      await tracer.run(tracer.beginSegment(), () async {});
+      expect(sender.sent, hasLength(1),
+          reason: 'segment should reach the global tracer\'s sender');
     });
   });
 
