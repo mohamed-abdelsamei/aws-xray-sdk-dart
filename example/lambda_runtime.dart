@@ -11,13 +11,13 @@
 //    runLambda() emits an independent subsegment document parented to
 //    Lambda's auto-created segment, so both appear correctly in X-Ray.
 //
-// 2. Read AWS_XRAY_DAEMON_ADDRESS at cold start.
-//    Lambda injects this env var.  Newer runtimes use 169.254.100.1:2000
-//    (link-local), NOT 127.0.0.1:2000.
-//
-// 3. Call XRay.patchHttp() exactly once at cold start.
-//    Double-patching wraps XRayHttpClient inside itself, producing
-//    duplicate subsegments for every outbound HTTP request.
+// 2. Call XRay.configure() once at cold start.
+//    It reads AWS_XRAY_DAEMON_ADDRESS (newer runtimes use the link-local
+//    169.254.100.1:2000, NOT 127.0.0.1:2000) and AWS_LAMBDA_FUNCTION_NAME,
+//    installs the process-wide default tracer, and patches dart:io HTTP — in
+//    one idempotent call. (In a real runtime, capture the trace header with
+//    LambdaTraceCapture and use XRay.runLambdaInvocation; this local example
+//    feeds a simulated header string directly to runLambda.)
 //
 // RESULTING X-RAY TRACE
 //
@@ -34,7 +34,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
-import 'package:http/http.dart' as http;
 
 // ── Run locally ──────────────────────────────────────────────────────────────
 
@@ -66,20 +65,21 @@ String _fakeParentId() {
 late final XRayTracer _tracer;
 
 Future<void> coldStart({Sender? sender}) async {
-  final raw =
-      Platform.environment['AWS_XRAY_DAEMON_ADDRESS'] ?? '127.0.0.1:2000';
-  final colon = raw.lastIndexOf(':');
-  final host = colon == -1 ? raw : raw.substring(0, colon);
-  final port = int.tryParse(raw.substring(colon + 1)) ?? 2000;
-
-  _tracer = XRayTracer(
-    serviceName:
-        Platform.environment['AWS_LAMBDA_FUNCTION_NAME'] ?? 'my-function',
-    sender: sender ?? UdpSender(host: host, port: port),
-    sampling: FixedRateSampler(1.0),
+  // XRay.configure() parses AWS_XRAY_DAEMON_ADDRESS (IPv6-safe) and
+  // AWS_LAMBDA_FUNCTION_NAME, installs the global tracer, and patches HTTP.
+  // It is idempotent, so calling it again per sandbox is a no-op.
+  //
+  // In production you would call simply `XRay.configure();`. Here we pass an
+  // explicit tracer so the example can use NoopSender + always-on sampling for
+  // a deterministic local run.
+  _tracer = XRay.configure(
+    tracer: XRayTracer(
+      serviceName:
+          Platform.environment['AWS_LAMBDA_FUNCTION_NAME'] ?? 'my-function',
+      sender: sender ?? UdpSender(),
+      sampling: FixedRateSampler(1.0),
+    ),
   );
-
-  XRay.patchHttp(_tracer);
 }
 
 // ── Per-invocation handler ──────────────────────────────────────────────────
@@ -123,11 +123,12 @@ Future<Map<String, Object?>> _handler(Map<String, Object?> event) async {
 
   // ── 3. DynamoDB PutItem call (traced once, namespace=aws) ──────────────────
   //
-  // patchHttp() is active, so this http.Client() is backed by an
-  // XRayHttpClient. XRayBaseClient automatically suppresses that inner patch
-  // for the duration of the send, so the request is traced exactly once (the
-  // rich AWS subsegment below), not duplicated as a bare host-named one.
-  final client = XRayBaseClient(http.Client(), _tracer);
+  // XRay.aws() returns an http.Client wrapped with X-Ray tracing, bound to the
+  // global tracer installed by configure(). patchHttp() is active, so the inner
+  // http.Client() is backed by an XRayHttpClient; XRayBaseClient suppresses
+  // that inner patch during the send, so the request is traced exactly once
+  // (the rich AWS subsegment below), not duplicated as a bare host-named one.
+  final client = XRay.aws();
   try {
     final body = utf8.encode(jsonEncode({
       'TableName': 'users',

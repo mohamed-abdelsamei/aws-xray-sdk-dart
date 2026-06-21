@@ -33,6 +33,17 @@ block, confirm the segment is closed.
 dart run example/basic_usage.dart
 ```
 
+### 1b. [zero_config.dart](zero_config.dart)
+
+The fastest setup: `XRay.configure()` reads the AWS environment, installs the
+process-wide default tracer (`XRay.tracer`), and patches HTTP in one idempotent
+call.  Also shows `XRay.aws()` for `aws_client` / `aws_*_api` clients,
+`tracer.annotateAll()`, and `XRay.reset()`.
+
+```bash
+dart run example/zero_config.dart
+```
+
 ### 2. [http_tracing.dart](http_tracing.dart)
 
 Automatic HTTP tracing via `XRay.patchHttp()`.  After a single call at startup
@@ -183,13 +194,8 @@ sender: NoopSender()
 // Production — send to local X-Ray daemon via UDP
 sender: UdpSender(host: '127.0.0.1', port: 2000)
 
-// Lambda — read the injected daemon address
-final raw = Platform.environment['AWS_XRAY_DAEMON_ADDRESS'] ?? '127.0.0.1:2000';
-final colon = raw.lastIndexOf(':');
-sender: UdpSender(
-  host: raw.substring(0, colon),
-  port: int.tryParse(raw.substring(colon + 1)) ?? 2000,
-)
+// Lambda — let XRay.configure() read AWS_XRAY_DAEMON_ADDRESS for you
+XRay.configure(); // parses the daemon address (IPv6-safe) + function name
 ```
 
 ### Annotations vs metadata
@@ -206,15 +212,15 @@ subsegment.addMetadata('amountCents', 4999);
 
 ### Library code without an explicit tracer parameter
 
-When writing library code you shouldn't need to accept a `XRayTracer`
-parameter.  Use `XRayTracer.current` to read the tracer stored in the active
-Zone, and `XRayTracer.currentSegment` to read the active segment:
+When writing library code you shouldn't need to accept an `XRayTracer`
+parameter.  Use the process-wide `XRay.tracer` (a no-op until `XRay.configure`
+runs, so this is always safe), and `tracer.currentSegment` to check whether a
+trace is active in the current Zone:
 
 ```dart
-final tracer = XRayTracer.current;   // null if called outside tracer.run()
-final segment = XRayTracer.currentSegment;
+final tracer = XRay.tracer;              // global default; no-op if unconfigured
 
-if (tracer != null) {
+if (tracer.currentSegment != null) {     // are we inside a tracer.run() zone?
   final sub = tracer.beginSubsegment('my-library-op');
   try {
     // ... do work ...
