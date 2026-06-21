@@ -59,6 +59,33 @@ void main() {
       expect(sub['namespace'], 'remote');
     });
 
+    test('XRay.httpClientFor wraps an inner client and traces AWS calls',
+        () async {
+      final inner = _MockClient(200, responseHeaders: {
+        'x-amzn-requestid': 'req-123',
+      });
+      final client = XRay.httpClientFor(tracer, inner: inner);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        final req = http.Request(
+          'POST',
+          Uri.parse('https://dynamodb.us-east-1.amazonaws.com/'),
+        )
+          ..headers['X-Amz-Target'] = 'DynamoDB_20120810.GetItem'
+          ..body = jsonEncode({'TableName': 'users'});
+        await client.send(req);
+      });
+
+      // Same AWS-aware naming/extraction as a hand-built XRayBaseClient.
+      final sub = sender.lastSubs.single as Map;
+      expect(sub['name'], 'DynamoDB');
+      expect(sub['namespace'], 'aws');
+      final aws = sub['aws'] as Map;
+      expect(aws['operation'], 'GetItem');
+      expect(aws['table_name'], 'users');
+    });
+
     test('injects X-Amzn-Trace-Id header', () async {
       String? capturedHeader;
       final inner = _MockClient(200, onRequest: (req) {

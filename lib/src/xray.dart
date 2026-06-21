@@ -1,4 +1,8 @@
 import 'dart:io';
+
+import 'package:http/http.dart' as http;
+
+import 'http/xray_base_client.dart';
 import 'http/xray_http_overrides.dart';
 import 'tracer.dart';
 import 'wrappers/client_registry.dart';
@@ -108,6 +112,28 @@ abstract final class XRay {
       HttpOverrides.global = current.previous;
     }
   }
+
+  /// Wraps a `package:http` [http.Client] with X-Ray tracing.
+  ///
+  /// A convenience for `XRayBaseClient(inner, tracer)`. Use it as the
+  /// underlying HTTP client for `package:http`-based AWS SDKs (e.g.
+  /// `aws_client` / the agilord `aws_*_api` packages), which accept an
+  /// `http.Client` — every request they make is then traced, with AWS-aware
+  /// subsegment naming and resource extraction (operation, table/queue/bucket)
+  /// for `*.amazonaws.com` hosts.
+  ///
+  /// ```dart
+  /// // aws_*_api clients take a `client:` argument:
+  /// final dynamoDB = DynamoDB(
+  ///   region: 'us-east-1',
+  ///   client: XRay.httpClientFor(tracer),
+  /// );
+  /// ```
+  ///
+  /// [inner] defaults to a fresh `http.Client()`. Tracing is gated on the
+  /// active [XRayTracer.run] zone: outside one, requests pass through untraced.
+  static http.Client httpClientFor(XRayTracer tracer, {http.Client? inner}) =>
+      XRayBaseClient(inner ?? http.Client(), tracer);
 
   /// Creates an [HttpClient] that is **not** traced by [patchHttp].
   ///
