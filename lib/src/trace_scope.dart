@@ -100,8 +100,9 @@ final class TraceScope implements TraceContext {
   void addChild(Subsegment sub) => _children.add(sub);
 
   /// Records HTTP request/response data for this scope. Folded onto the
-  /// segment in [applyToSegment]; currently set only on the root by the
-  /// server middleware.
+  /// serialized entity by both [applyToSegment] (the `run` path) and
+  /// [toSubsegment] (the `runLambda` path). Currently set only on the root by
+  /// the server middleware.
   void setHttp(HttpData http) => _http = http;
 
   @override
@@ -143,6 +144,7 @@ final class TraceScope implements TraceContext {
     for (final child in _children) {
       sub = sub.addChild(child);
     }
+    if (_http != null) sub = sub.withHttp(_http!);
     _annotations.forEach((k, v) => sub = sub.annotate(k, v));
     _metadata.forEach((ns, kv) {
       kv.forEach((k, v) => sub = sub.addMetadata(k, v, namespace: ns));

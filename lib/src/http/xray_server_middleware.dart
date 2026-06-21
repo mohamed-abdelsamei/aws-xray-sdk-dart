@@ -46,26 +46,38 @@ Future<T> handleTraced<T>(
   return tracer.run(
     segment,
     () async {
+      var threw = true;
       try {
-        return await handler();
+        final result = await handler();
+        threw = false;
+        return result;
       } finally {
         final response = request.response;
         // Record the request and response on the segment so this node appears
         // in the X-Ray service map with method/url/status. `traced: true`
-        // marks that the trace header was forwarded downstream. Recorded in
-        // the finally so a thrown handler still captures the response status.
-        // Reading status/contentLength is safe even if the body is closed.
+        // marks that the trace header was forwarded downstream.
+        //
+        // When the handler threw before assigning a status, `statusCode` is
+        // still dart:io's default 200 — recording that would mislabel a
+        // faulted request as a success, so the status is omitted and the
+        // fault recorded by run() stands alone.
+        //
+        // `contentLength` is whatever the handler set on the response (−1 /
+        // absent when unset); it is the declared length, not bytes written.
         tracer.recordSegmentHttp(HttpData(
           request: HttpRequestData(
             method: method,
             url: request.uri.toString(),
             traced: true,
           ),
-          response: HttpResponseData(
-            status: response.statusCode,
-            contentLength:
-                response.contentLength >= 0 ? response.contentLength : null,
-          ),
+          response: threw
+              ? null
+              : HttpResponseData(
+                  status: response.statusCode,
+                  contentLength: response.contentLength >= 0
+                      ? response.contentLength
+                      : null,
+                ),
         ));
         // Read tracer.isSampled inside the zone so it reflects the real
         // decision (outside a zone the getter would fail open to `true`,
