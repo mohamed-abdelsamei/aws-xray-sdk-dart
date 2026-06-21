@@ -1,4 +1,5 @@
 import 'models/annotation.dart';
+import 'models/http_data.dart';
 import 'models/segment.dart';
 import 'models/subsegment.dart';
 import 'utils.dart';
@@ -94,8 +95,15 @@ final class TraceScope implements TraceContext {
   bool _fault = false;
   bool _error = false;
   Object? _errorObject;
+  HttpData? _http;
 
   void addChild(Subsegment sub) => _children.add(sub);
+
+  /// Records HTTP request/response data for this scope. Folded onto the
+  /// serialized entity by both [applyToSegment] (the `run` path) and
+  /// [toSubsegment] (the `runLambda` path). Currently set only on the root by
+  /// the server middleware.
+  void setHttp(HttpData http) => _http = http;
 
   @override
   void annotate(String key, Object value) =>
@@ -136,6 +144,7 @@ final class TraceScope implements TraceContext {
     for (final child in _children) {
       sub = sub.addChild(child);
     }
+    if (_http != null) sub = sub.withHttp(_http!);
     _annotations.forEach((k, v) => sub = sub.annotate(k, v));
     _metadata.forEach((ns, kv) {
       kv.forEach((k, v) => sub = sub.addMetadata(k, v, namespace: ns));
@@ -151,6 +160,7 @@ final class TraceScope implements TraceContext {
   /// Folds this root scope's accumulated state onto [segment] and closes it.
   Segment applyToSegment(Segment segment) {
     var s = segment.close();
+    if (_http != null) s = s.withHttp(_http!);
     _annotations.forEach((k, v) => s = s.annotate(k, v));
     _metadata.forEach((ns, kv) {
       kv.forEach((k, v) => s = s.addMetadata(k, v, namespace: ns));

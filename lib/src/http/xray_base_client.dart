@@ -57,7 +57,11 @@ import '../utils.dart' show awsDomainSuffix;
 /// final response = await client.get(Uri.parse('https://api.example.com'));
 /// ```
 final class XRayBaseClient extends http.BaseClient {
-  XRayBaseClient(this._inner, this._tracer);
+  /// Wraps [inner]. [tracer] defaults to the process-wide [defaultTracer]
+  /// (a no-op until `XRay.configure` / `XRay.tracer` installs one), so
+  /// `XRayBaseClient(http.Client())` works without an explicit tracer.
+  XRayBaseClient(this._inner, [XRayTracer? tracer])
+      : _tracer = tracer ?? defaultTracer;
 
   final http.Client _inner;
   final XRayTracer _tracer;
@@ -324,6 +328,10 @@ final class XRayBaseClient extends http.BaseClient {
     );
   }
 
+  // TODO: Replace regex with proper XML parsing. The current approach is
+  // fragile — it breaks on namespaces, CDATA sections, and encoding quirks.
+  // AWS query-protocol error bodies are simple enough for now, but this will
+  // need hardening for broader XML coverage.
   static String? _xmlTag(String xml, String tag) {
     final match = RegExp('<$tag>(.*?)</$tag>', dotAll: true).firstMatch(xml);
     return match?.group(1)?.trim();

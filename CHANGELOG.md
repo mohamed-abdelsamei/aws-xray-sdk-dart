@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.3.0-beta.1
+
+First beta of the 0.3.0 line. Themes: zero-config setup ergonomics, segment-level
+HTTP recording for the server middleware, and a packaged Lambda trace-header
+capture. Pre-release — published for integration testing.
+
+### Added
+
+- **Zero-config setup.** `XRay.configure({fromEnv, serviceName, sampling,
+  tracer, patchDartIoHttp})` builds a tracer from the standard AWS environment
+  (`AWS_XRAY_DAEMON_ADDRESS`, IPv6-literal safe; `AWS_LAMBDA_FUNCTION_NAME`),
+  installs it as the process-wide default, and patches HTTP — in one idempotent
+  call. `XRay.reset()` returns to the unconfigured state.
+- **Global default tracer.** `XRay.tracer` getter/setter and `XRay.isConfigured`.
+  Until configured, the default is a **no-op** that discards everything, so
+  instrumentation runs unconditionally without null checks.
+- **`XRay.aws({inner})`** and an optional-tracer **`XRay.httpClientFor`** return a
+  pre-wrapped `package:http` client (using the global tracer) for
+  `aws_client` / `aws_*_api` constructors.
+- **`XRayBaseClient(inner)`** now accepts an optional tracer, defaulting to the
+  global default tracer.
+- **`XRay.runLambdaInvocation(capture, name, fn)`** runs one Lambda invocation,
+  parenting under the `AWS::Lambda::Function` facade when a trace header was
+  captured or starting a fresh segment otherwise.
+- **`LambdaTraceCapture`** packages the `Lambda-Runtime-Trace-Id` capture
+  (`http.runWithClient`-based) and exposes a parsed `LambdaTraceContext`
+  (`traceId`, `parentId`, `sampled`) — no runtime fork needed.
+- **`XRayTracer.annotateAll(Map)`** adds many annotations in one call.
+- **`XRayTracer.currentTraceId`** convenience getter for the active trace id.
+- **Segment HTTP data.** `Segment.http` (with `Segment.withHttp`); `handleTraced`
+  now records the request (method, url, traced) and response (status,
+  content_length) on the segment for the X-Ray service map, and forwards the
+  request method/path into the sampling decision. `Segment.http` was removed in
+  0.2.0 as structurally unusable; it is reintroduced now that the middleware
+  populates it.
+
+### Changed
+
+- `handleTraced` reads the sampling decision **inside** the run zone, so an
+  unsampled trace is correctly marked `Sampled=0` on the outgoing header
+  (previously could fail open to `Sampled=1`).
+- A handler that throws before setting a status no longer records a misleading
+  `200`; the response block is omitted so the faulted segment stands alone.
+
+### Documentation
+
+- README: zero-config setup, the `aws_client` / `aws_*_api` recipe, and the
+  `LambdaTraceCapture`-based Lambda example (replacing a hand-rolled shim).
+- `doc/architecture.md`: updated for the new facade/tracer API surface.
+
 ## 0.2.1
 
 ### Documentation

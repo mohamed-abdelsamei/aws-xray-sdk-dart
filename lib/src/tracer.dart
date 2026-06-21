@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'models/http_data.dart';
 import 'models/segment.dart';
 import 'models/subsegment.dart';
 import 'models/trace_id.dart';
 import 'sampling/fixed_rate_sampler.dart';
 import 'sampling/sampling_strategy.dart';
+import 'sender/noop_sender.dart';
 import 'sender/segment_encoder.dart';
 import 'sender/sender.dart';
 import 'sender/udp_sender.dart';
@@ -38,6 +40,33 @@ enum ContextMissingPolicy {
   logError,
   runtimeError,
 }
+
+// The process-wide default tracer, or null until one is installed (see
+// [defaultTracer] / [XRay.configure]). Lives here, not on the XRay facade, so
+// XRayBaseClient can resolve it without importing the facade (avoiding an
+// import cycle).
+XRayTracer? _defaultTracer;
+XRayTracer? _noopTracer;
+
+/// The process-wide default [XRayTracer]: the installed tracer, or a shared
+/// no-op (discards everything) when none has been installed. Instrumentation
+/// resolves this so it can run unconditionally and simply do nothing when
+/// tracing is unconfigured.
+///
+/// Prefer the `XRay.tracer` / `XRay.configure` API over using this directly.
+XRayTracer get defaultTracer =>
+    _defaultTracer ??
+    (_noopTracer ??= XRayTracer(
+      serviceName: 'unconfigured',
+      sender: NoopSender(),
+      sampling: FixedRateSampler(0.0),
+    ));
+
+/// Installs (or clears, with null) the process-wide default tracer.
+set defaultTracer(XRayTracer? value) => _defaultTracer = value;
+
+/// Whether a real (non-no-op) default tracer has been installed.
+bool get isDefaultTracerConfigured => _defaultTracer != null;
 
 /// Central X-Ray tracing context.
 ///
@@ -220,6 +249,12 @@ final class XRayTracer {
   /// would actually be lost; see [endSubsegment] / [failSubsegment].
   Segment? get currentSegment => Zone.current[_zoneKey] as Segment?;
 
+  /// The [TraceId] of the active segment, or `null` if no trace is active.
+  ///
+  /// Convenience inside a [run] or [runLambda] callback so callers can write
+  /// `tracer.currentTraceId` instead of `tracer.currentSegment?.traceId`.
+  TraceId? get currentTraceId => currentSegment?.traceId;
+
   /// Applies [contextMissingPolicy] when a subsegment is recorded but there is
   /// no active trace in the current zone to attach it to (so the data would be
   /// silently dropped).
@@ -314,6 +349,20 @@ final class XRayTracer {
     scope.annotate(key, value);
   }
 
+  /// Adds every entry of [annotations] to the entity currently being traced.
+  ///
+  /// A bulk form of [annotate] (same key/value sanitization rules). The context
+  /// is resolved once: if there is no active trace, the whole batch is dropped
+  /// and [contextMissingPolicy] is applied a single time.
+  void annotateAll(Map<String, Object> annotations) {
+    final scope = _currentScope;
+    if (scope == null) {
+      _handleContextMissing();
+      return;
+    }
+    annotations.forEach(scope.annotate);
+  }
+
   /// Adds non-indexed metadata to the entity currently being traced.
   ///
   /// Metadata is not indexed (not searchable via filter expressions) and is not
@@ -380,6 +429,21 @@ final class XRayTracer {
         state.pending.remove(sub.id)?.parent ?? _currentScope ?? state.root;
     parent.addChild(sub);
     state.closedIds.add(sub.id);
+  }
+
+  /// Records HTTP request/response data on the **root segment** of the current
+  /// trace (not on any nested [captureAsync] scope).
+  ///
+  /// Intended for the server middleware, which knows the incoming request and
+  /// outgoing response. Folded onto the segment when it is finalized. A no-op
+  /// outside a [run] zone.
+  void recordSegmentHttp(HttpData http) {
+    final state = Zone.current[_stateKey] as TraceState?;
+    if (state == null) {
+      _handleContextMissing();
+      return;
+    }
+    state.root.setHttp(http);
   }
 
   /// Whether the current zone's trace is being sampled.

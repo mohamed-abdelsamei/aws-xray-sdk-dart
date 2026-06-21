@@ -1,5 +1,6 @@
 import 'annotation.dart';
 import 'cause.dart';
+import 'http_data.dart';
 import 'subsegment.dart';
 import 'trace_id.dart';
 import '../utils.dart';
@@ -26,6 +27,7 @@ final class Segment {
     this.subsegments = const [],
     this.user,
     this.origin,
+    this.http,
   });
 
   final String id;
@@ -46,6 +48,7 @@ final class Segment {
   final List<Subsegment> subsegments;
   final String? user;
   final String? origin;
+  final HttpData? http;
 
   factory Segment.begin({
     required String name,
@@ -93,6 +96,9 @@ final class Segment {
   Segment addSubsegment(Subsegment sub) =>
       _copyWith(subsegments: [...subsegments, sub]);
 
+  /// Attaches HTTP request/response data (recorded by the server middleware).
+  Segment withHttp(HttpData data) => _copyWith(http: data);
+
   /// Adds an indexed annotation.
   ///
   /// [key] is sanitized to X-Ray's allowed character set (`[A-Za-z0-9_]`) and
@@ -134,6 +140,7 @@ final class Segment {
         if (metadata != null) 'metadata': metadata,
         if (user != null) 'user': user,
         if (origin != null) 'origin': origin,
+        if (http != null) 'http': http!.toJson(),
         if (subsegments.isNotEmpty)
           'subsegments': [for (final s in subsegments) s.toJson()],
       };
@@ -148,6 +155,7 @@ final class Segment {
     Map<String, Object>? annotations,
     Map<String, Map<String, Object>>? metadata,
     List<Subsegment>? subsegments,
+    HttpData? http,
   }) =>
       Segment._(
         id: id,
@@ -167,5 +175,6 @@ final class Segment {
         subsegments: subsegments ?? this.subsegments,
         user: user,
         origin: origin,
+        http: http ?? this.http,
       );
 }

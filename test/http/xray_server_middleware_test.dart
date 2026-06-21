@@ -97,6 +97,57 @@ void main() {
       expect(header, contains('Root=$upstreamTrace'));
     });
 
+    test('records request and response http data on the segment', () async {
+      await serveAndCapture(rate: 1.0);
+
+      final http = sender.last['http'] as Map<String, Object?>;
+      final request = http['request'] as Map<String, Object?>;
+      final response = http['response'] as Map<String, Object?>;
+
+      expect(request['method'], 'GET');
+      expect(request['url'], contains('/orders'));
+      expect(request['traced'], true);
+      expect(response['status'], 200);
+    });
+
+    test('a thrown handler records a fault and omits the response status',
+        () async {
+      // statusCode defaults to 200 in dart:io; recording it for a handler that
+      // threw before setting one would mislabel a faulted request as a 200
+      // success. The status must be omitted, leaving run()'s fault to stand.
+      sender = _RecordingSender();
+      final tracer = XRayTracer(
+        serviceName: 'edge-svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+      );
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((req) async {
+        try {
+          await handleTraced(req, tracer, () async {
+            throw StateError('boom');
+          });
+        } catch (_) {
+          req.response.statusCode = 500;
+        }
+        await req.response.close();
+      });
+
+      final client = HttpClient();
+      final req = await client
+          .getUrl(Uri.parse('http://127.0.0.1:${server.port}/orders'));
+      final res = await req.close();
+      await res.drain<void>();
+      client.close();
+
+      final seg = sender.last;
+      expect(seg['fault'], true);
+      final http = seg['http'] as Map<String, Object?>;
+      expect(http['request'], isNotNull);
+      expect(http.containsKey('response'), isFalse,
+          reason: 'status must be omitted when the handler threw');
+    });
+
     test('runs the handler inside an active trace zone', () async {
       Segment? captured;
       final upstreamTrace = TraceId.generate();

@@ -56,3 +56,6 @@ export 'src/http/xray_base_client.dart';
 
 // Server middleware
 export 'src/http/xray_server_middleware.dart';
+
+// Lambda trace-header capture
+export 'src/lambda/lambda_trace_capture.dart';

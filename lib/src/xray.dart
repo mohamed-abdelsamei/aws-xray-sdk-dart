@@ -1,5 +1,12 @@
 import 'dart:io';
+
+import 'package:http/http.dart' as http;
+
+import 'http/xray_base_client.dart';
 import 'http/xray_http_overrides.dart';
+import 'lambda/lambda_trace_capture.dart';
+import 'models/segment.dart';
+import 'sampling/sampling_strategy.dart';
 import 'tracer.dart';
 import 'wrappers/client_registry.dart';
 import 'wrappers/resource_extractor.dart';
@@ -11,6 +18,93 @@ import 'wrappers/xray_interceptor.dart';
 /// automatically trace all `dart:io` HTTP calls.
 abstract final class XRay {
   XRay._();
+
+  /// The process-wide default [XRayTracer].
+  ///
+  /// Returns the tracer installed by [configure] or the [tracer] setter; if
+  /// none has been installed, returns a shared **no-op** tracer that discards
+  /// everything. This lets `XRay`-based instrumentation (e.g. the zero-arg
+  /// `XRayBaseClient`) run unconditionally — when tracing is unconfigured it
+  /// simply does nothing.
+  static XRayTracer get tracer => defaultTracer;
+
+  /// Installs [value] as the process-wide default tracer (see [tracer]).
+  ///
+  /// Set to null to clear it (the no-op resumes). Mainly for tests and for
+  /// callers that build their own tracer instead of calling [configure].
+  static set tracer(XRayTracer? value) => defaultTracer = value;
+
+  /// Whether a real (non-no-op) tracer has been installed via [configure] or
+  /// the [tracer] setter.
+  static bool get isConfigured => isDefaultTracerConfigured;
+
+  /// One-call setup: builds a tracer, installs it as the process-wide default
+  /// ([tracer]), and patches `dart:io` HTTP ([patchHttp]).
+  ///
+  /// **Idempotent** — calling it again is a no-op and returns the already-
+  /// installed tracer, so it is safe to call from multiple entry points or
+  /// repeatedly in tests (use [reset] to force re-configuration).
+  ///
+  /// When [fromEnv] is true (the default) the standard AWS environment is read:
+  ///  * `AWS_XRAY_DAEMON_ADDRESS` → daemon `host:port` (IPv6-literal safe),
+  ///    falling back to `127.0.0.1:2000`;
+  ///  * `AWS_LAMBDA_FUNCTION_NAME` → default service name.
+  ///
+  /// Explicit [serviceName], [sampling], or a fully built [tracer] override the
+  /// environment. Pass [patchDartIoHttp] = false to skip the global HTTP patch.
+  static XRayTracer configure({
+    XRayTracer? tracer,
+    String? serviceName,
+    SamplingStrategy? sampling,
+    bool fromEnv = true,
+    bool patchDartIoHttp = true,
+  }) {
+    final existing = _resolveInstalled();
+    if (existing != null) return existing;
+
+    final env = fromEnv ? Platform.environment : const <String, String>{};
+    final (host, port) = _parseDaemonAddress(env['AWS_XRAY_DAEMON_ADDRESS']);
+    final name =
+        serviceName ?? env['AWS_LAMBDA_FUNCTION_NAME'] ?? 'dart-service';
+
+    final built = tracer ??
+        XRayTracer(
+          serviceName: name,
+          sampling: sampling,
+          daemonHost: host,
+          daemonPort: port,
+        );
+
+    defaultTracer = built;
+    if (patchDartIoHttp) patchHttp(built);
+    return built;
+  }
+
+  /// Clears the installed default tracer and removes the HTTP patch, returning
+  /// to the unconfigured (no-op) state. Intended for tests.
+  static void reset() {
+    unpatchHttp();
+    defaultTracer = null;
+  }
+
+  static XRayTracer? _resolveInstalled() =>
+      isDefaultTracerConfigured ? defaultTracer : null;
+
+  /// Splits an `AWS_XRAY_DAEMON_ADDRESS` value into `(host, port)`, defaulting
+  /// to `127.0.0.1:2000`. Uses [String.lastIndexOf] for the port separator so
+  /// IPv6 literals (which contain `:`) are handled correctly.
+  static (String, int) _parseDaemonAddress(String? value) {
+    const defaultHost = '127.0.0.1';
+    const defaultPort = 2000;
+    if (value == null || value.isEmpty) return (defaultHost, defaultPort);
+
+    final sep = value.lastIndexOf(':');
+    if (sep <= 0 || sep == value.length - 1) return (value, defaultPort);
+
+    final host = value.substring(0, sep);
+    final port = int.tryParse(value.substring(sep + 1));
+    return (host, port ?? defaultPort);
+  }
 
   /// Wraps [client] with X-Ray tracing and returns an instrumented copy.
   ///
@@ -107,6 +201,89 @@ abstract final class XRay {
     if (current is XRayHttpOverrides) {
       HttpOverrides.global = current.previous;
     }
+  }
+
+  /// Wraps a `package:http` [http.Client] with X-Ray tracing.
+  ///
+  /// A convenience for `XRayBaseClient(inner, tracer)`. Use it as the
+  /// underlying HTTP client for `package:http`-based AWS SDKs (e.g.
+  /// `aws_client` / the agilord `aws_*_api` packages), which accept an
+  /// `http.Client` — every request they make is then traced, with AWS-aware
+  /// subsegment naming and resource extraction (operation, table/queue/bucket)
+  /// for `*.amazonaws.com` hosts.
+  ///
+  /// ```dart
+  /// // aws_*_api clients take a `client:` argument:
+  /// final dynamoDB = DynamoDB(
+  ///   region: 'us-east-1',
+  ///   client: XRay.httpClientFor(tracer),
+  /// );
+  /// ```
+  ///
+  /// [inner] defaults to a fresh `http.Client()`. [tracer] defaults to the
+  /// process-wide [tracer] (the no-op until [configure] runs). Tracing is gated
+  /// on the active [XRayTracer.run] zone: outside one, requests pass through
+  /// untraced.
+  static http.Client httpClientFor(XRayTracer? tracer, {http.Client? inner}) =>
+      XRayBaseClient(inner ?? http.Client(), tracer ?? defaultTracer);
+
+  /// Returns a pre-wrapped `http.Client` for AWS SDKs, using the process-wide
+  /// default [tracer].
+  ///
+  /// Zero-config shorthand for `httpClientFor(null, inner: inner)` — hand it to
+  /// any `aws_client` / `aws_*_api` client's `client:` argument so all its
+  /// calls are traced once `XRay.configure` has run:
+  ///
+  /// ```dart
+  /// final ddb = DynamoDB(region: 'us-east-1', client: XRay.aws());
+  /// ```
+  static http.Client aws({http.Client? inner}) =>
+      XRayBaseClient(inner ?? http.Client(), defaultTracer);
+
+  /// Runs a single Lambda invocation [fn] correctly traced, using the trace
+  /// context [capture] sniffed from the runtime's `Lambda-Runtime-Trace-Id`
+  /// header.
+  ///
+  /// When the captured context carries a parent id, the work is parented under
+  /// Lambda's auto-created `AWS::Lambda::Function` segment via
+  /// [XRayTracer.runLambda]; otherwise (no header captured — e.g. local
+  /// testing) a fresh top-level segment is started via [XRayTracer.run]. Uses
+  /// the process-wide [tracer], so [configure] should run first.
+  ///
+  /// The runtime-specific handler glue (extracting [functionName] and the event)
+  /// stays with the caller; this collapses the open/close/parent-decision into
+  /// one call. Drive the runtime loop inside `capture.run(...)` so the header is
+  /// captured:
+  ///
+  /// ```dart
+  /// final capture = LambdaTraceCapture();
+  /// await capture.run(() => invokeAwsLambdaRuntime([
+  ///   FunctionHandler(name: 'h', action: (ctx, event) =>
+  ///     XRay.runLambdaInvocation(capture, ctx.functionName,
+  ///       () => handle(ctx, event))),
+  /// ]));
+  /// ```
+  static Future<T> runLambdaInvocation<T>(
+    LambdaTraceCapture capture,
+    String functionName,
+    Future<T> Function() fn,
+  ) {
+    final tc = capture.context();
+    if (tc.parentId != null) {
+      return tracer.runLambda(
+        tc.traceId,
+        tc.parentId!,
+        functionName,
+        fn,
+        sampled: tc.sampled,
+      );
+    }
+    final segment = Segment.begin(
+      name: functionName,
+      traceId: tc.traceId,
+      origin: 'AWS::Lambda::Function',
+    );
+    return tracer.run(segment, fn);
   }
 
   /// Creates an [HttpClient] that is **not** traced by [patchHttp].

@@ -67,6 +67,27 @@ Future<void> processOrder(String orderId) {
 }
 ```
 
+### Zero-config setup
+
+`XRay.configure()` builds a tracer from the standard AWS environment
+(`AWS_XRAY_DAEMON_ADDRESS`, `AWS_LAMBDA_FUNCTION_NAME`), installs it as the
+process-wide default (`XRay.tracer`), and patches `dart:io` HTTP — in one call.
+It is **idempotent**, so it's safe to call from multiple entry points.
+
+```dart
+void main() {
+  XRay.configure(); // reads env, installs the global tracer, patches HTTP
+
+  // Anywhere else, with no tracer threading:
+  final ddb = DynamoDB(region: 'us-east-1', client: XRay.aws());
+  // XRay.tracer is the configured tracer; until configure() runs it is a
+  // no-op that discards everything, so instrumentation is safe either way.
+}
+```
+
+Override any piece: `XRay.configure(serviceName: 'svc', sampling: ReservoirSampler())`.
+Use `XRay.reset()` to return to the unconfigured (no-op) state, e.g. in tests.
+
 ---
 
 ## HTTP tracing
@@ -115,6 +136,24 @@ await tracer.run(segment, () => client.get(Uri.parse('https://api.example.com'))
 `XRayBaseClient` injects the trace header into the `http.BaseRequest` it sends.
 Treat `package:http` request objects as single-use, as intended by the package;
 re-sending the same request instance can reuse the first attempt's `Parent=` id.
+
+#### AWS SDKs on `package:http` (`aws_client` / `aws_*_api`)
+
+AWS SDK packages that take an `http.Client` (e.g. `aws_client` and the agilord
+`aws_*_api` packages) can be traced by handing them a wrapped client. Use the
+`XRay.httpClientFor` convenience:
+
+```dart
+final dynamoDB = DynamoDB(
+  region: 'us-east-1',
+  client: XRay.httpClientFor(tracer), // every call is traced
+);
+await tracer.run(segment, () => dynamoDB.getItem(/* ... */));
+```
+
+For `*.amazonaws.com` hosts the subsegment is named after the service and gains
+AWS resource data (operation, table/queue/bucket) automatically — no
+`registerClient` needed (that path is for Smithy-generated clients).
 
 ### Response-body lifecycle
 
@@ -366,50 +405,37 @@ final tracer = XRayTracer(
 
 ### Using `aws_lambda_dart_runtime_ns`
 
-A minimal shim for the [`aws_lambda_dart_runtime_ns`](https://pub.dev/packages/aws_lambda_dart_runtime_ns)
-package intercepts the `Lambda-Runtime-Trace-Id` header and wraps each handler
-with `runLambda`:
+`LambdaTraceCapture` does the trace-header capture for you. It overrides the
+global `package:http` client for a zone (the runtime polls `/invocation/next`
+through it) and parses the `Lambda-Runtime-Trace-Id` header into a
+`LambdaTraceContext`. You supply only the runtime-specific handler glue, which
+depends on the [`aws_lambda_dart_runtime_ns`](https://pub.dev/packages/aws_lambda_dart_runtime_ns)
+types:
 
 ```dart
-String _lambdaTraceHeader = '';
+final tracer = XRayTracer(serviceName: 'my-function');
+final capture = LambdaTraceCapture();
 
-// Wrap the runtime loop to capture the trace header from /invocation/next:
-Future<void> invokeWithXRay(Future<void> Function() fn) =>
-    http.runWithClient(fn, () {
-      final inner = http.Client();
-      return http.BaseClient()
-        ..send = (req) async {
-          final res = await inner.send(req);
-          final h = res.headers['lambda-runtime-trace-id'];
-          if (h != null && h.isNotEmpty) _lambdaTraceHeader = h;
-          return res;
-        };
-    }());
-
-FunctionHandler xRayHandler({required XRayTracer tracer, required FunctionAction action}) =>
-    FunctionHandler(
+FunctionHandler xRayHandler(FunctionAction action) => FunctionHandler(
       name: 'xray',
-      action: (ctx, event) async {
-        final raw = _lambdaTraceHeader;
-        final traceId = TraceId.tryParse(raw) ?? TraceId.generate();
-        final parentId = TraceId.parseParentId(raw);
-        if (parentId != null) {
-          return tracer.runLambda(traceId, parentId, ctx.functionName,
-              () => action(ctx, event),
-              sampled: TraceId.parseSampled(raw) ?? true);
+      action: (ctx, event) {
+        final tc = capture.context(); // parsed from the captured header
+        if (tc.parentId != null) {
+          return tracer.runLambda(
+            tc.traceId, tc.parentId!, ctx.functionName,
+            () => action(ctx, event),
+            sampled: tc.sampled,
+          );
         }
-        final segment = Segment.begin(name: ctx.functionName, traceId: traceId);
+        // No header captured — start a fresh top-level segment.
+        final segment = Segment.begin(name: ctx.functionName, traceId: tc.traceId);
         return tracer.run(segment, () => action(ctx, event));
       },
     );
 
-void main() async {
-  final tracer = XRayTracer(serviceName: 'my-function');
-  XRay.patchHttp(tracer);
-  await invokeWithXRay(() => invokeAwsLambdaRuntime([
-    xRayHandler(tracer: tracer, action: handleEvent),
-  ]));
-}
+void main() => capture.run(() => invokeAwsLambdaRuntime([
+      xRayHandler(handleEvent),
+    ]));
 ```
 
 ### Complete Lambda example

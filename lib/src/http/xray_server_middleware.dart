@@ -1,16 +1,22 @@
 import 'dart:io';
 
+import '../models/http_data.dart';
 import '../models/segment.dart';
 import '../models/trace_id.dart';
 import '../trace_header.dart';
 import '../tracer.dart';
 
 /// Extracts X-Ray trace context from an incoming HTTP request's
-/// `X-Amzn-Trace-Id` header and runs [handler] inside [tracer.run].
+/// `X-Amzn-Trace-Id` header and runs [handler] inside [XRayTracer.run].
 ///
 /// If the header carries a `Parent=` (segment ID from the upstream service),
 /// it is set on the segment so the X-Ray service map correctly links this
 /// service as a downstream node.
+///
+/// The request method and path are forwarded into the sampling decision (so
+/// path/method-based rules can match), and the request (method, url) and
+/// response (status, content length) are recorded on the segment's `http`
+/// block for the service map.
 ///
 /// Usage with `dart:io` [HttpServer]:
 /// ```dart
@@ -34,30 +40,63 @@ Future<T> handleTraced<T>(
     parentId: parentId,
   );
 
-  // Captured inside the run zone where tracer.isSampled reflects the real
-  // decision. Read in the finally block — after run() returns — the getter
-  // would be outside the zone and fail open to `true`, mislabelling the
-  // outgoing header as Sampled=1 for unsampled traces.
-  var sampled = true;
-  try {
-    return await tracer.run(segment, () async {
-      sampled = tracer.isSampled;
-      return await handler();
-    });
-  } finally {
-    // Attempt to set the trace-id header on the response so downstream
-    // services can continue the trace. The response may already have been
-    // closed by the handler — in that case headers are immutable and the
-    // set throws; we swallow the error.
-    try {
-      request.response.headers.set(
-        'x-amzn-trace-id',
-        buildTraceHeader(
-          traceId: segment.traceId.toString(),
-          segmentId: segment.id,
-          sampled: sampled,
-        ),
-      );
-    } catch (_) {}
-  }
+  final method = request.method;
+  final urlPath = request.uri.path.isEmpty ? '/' : request.uri.path;
+
+  return tracer.run(
+    segment,
+    () async {
+      var threw = true;
+      try {
+        final result = await handler();
+        threw = false;
+        return result;
+      } finally {
+        final response = request.response;
+        // Record the request and response on the segment so this node appears
+        // in the X-Ray service map with method/url/status. `traced: true`
+        // marks that the trace header was forwarded downstream.
+        //
+        // When the handler threw before assigning a status, `statusCode` is
+        // still dart:io's default 200 — recording that would mislabel a
+        // faulted request as a success, so the status is omitted and the
+        // fault recorded by run() stands alone.
+        //
+        // `contentLength` is whatever the handler set on the response (−1 /
+        // absent when unset); it is the declared length, not bytes written.
+        tracer.recordSegmentHttp(HttpData(
+          request: HttpRequestData(
+            method: method,
+            url: request.uri.toString(),
+            traced: true,
+          ),
+          response: threw
+              ? null
+              : HttpResponseData(
+                  status: response.statusCode,
+                  contentLength: response.contentLength >= 0
+                      ? response.contentLength
+                      : null,
+                ),
+        ));
+        // Read tracer.isSampled inside the zone so it reflects the real
+        // decision (outside a zone the getter would fail open to `true`,
+        // mislabelling the header as Sampled=1 for unsampled traces).
+        // The response may already have been closed — headers are immutable
+        // and the set throws; we swallow the error.
+        try {
+          response.headers.set(
+            'x-amzn-trace-id',
+            buildTraceHeader(
+              traceId: segment.traceId.toString(),
+              segmentId: segment.id,
+              sampled: tracer.isSampled,
+            ),
+          );
+        } catch (_) {}
+      }
+    },
+    httpMethod: method,
+    urlPath: urlPath,
+  );
 }

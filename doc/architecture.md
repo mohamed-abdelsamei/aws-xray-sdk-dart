@@ -21,7 +21,8 @@ For exact runtime contracts and edge-case behavior, see
   - central trace context for one service instance.
   - manages active segment/subsegment state via Dart `Zone`.
   - exposes `run`, `runLambda`, `beginSegment`, `closeSegment`, `beginSubsegment`, `endSubsegment`, and `failSubsegment`.
-  - `captureAsync(name, fn)` runs a block as a **nested** subsegment, and `annotate` / `addMetadata` mutate the entity currently being traced.
+  - `captureAsync(name, fn)` runs a block as a **nested** subsegment, and `annotate` / `annotateAll` / `addMetadata` mutate the entity currently being traced.
+  - `currentSegment` / `currentTraceId` read the active trace context inside a `run` / `runLambda` zone (both `null` outside one); `recordSegmentHttp` attaches HTTP request/response data to the root segment.
 
 - `TraceContext`
   - the live handle passed to a `captureAsync` block: `annotate`, `addMetadata`, `setError`, `setFault`.
@@ -29,14 +30,22 @@ For exact runtime contracts and edge-case behavior, see
 
 - `XRay`
   - facade for integration helpers.
+  - `configure({fromEnv, serviceName, sampling, tracer, patchDartIoHttp})` — one-call, **idempotent** setup: parses `AWS_XRAY_DAEMON_ADDRESS` (IPv6-safe) and `AWS_LAMBDA_FUNCTION_NAME`, installs the process-wide default tracer, and patches HTTP. `reset()` returns to the unconfigured state.
+  - `tracer` getter/setter — the process-wide default `XRayTracer`; a **no-op** that discards everything until configured, so instrumentation runs unconditionally. `isConfigured` reports whether a real tracer is installed.
   - `patchHttp(tracer)` and `unpatchHttp()` for global `dart:io` HTTP patching.
   - `untracedHttpClient()` to build an unwrapped transport when tracing should be avoided.
+  - `httpClientFor(tracer)` / `aws()` to wrap a `package:http` client (for `aws_client` / `aws_*_api`); `aws()` uses the global default tracer.
+  - `runLambdaInvocation(capture, name, fn)` — runs one Lambda invocation, parenting under the function facade when a header was captured or starting a fresh segment otherwise.
   - `registerClient` / `fromClient` for Smithy AWS SDK client wrapping.
+
+- `LambdaTraceCapture`
+  - captures the `Lambda-Runtime-Trace-Id` header for custom Lambda runtimes and exposes a parsed `LambdaTraceContext` for `runLambda`.
 
 ### Models
 
 - `TraceId`, `Segment`, `Subsegment` represent X-Ray trace documents.
 - `HttpData`, `AwsData`, `Cause` model X-Ray metadata blocks.
+- Both `Segment` and `Subsegment` carry an optional `http` block (`HttpData`); on the root segment it is populated by the server middleware.
 - `Segment` serialization supports split UDP payloads for large traces.
 
 ### Transport
@@ -75,6 +84,11 @@ For exact runtime contracts and edge-case behavior, see
   names, AWS error causes, and AWS throttle detection by error code.
 - `XRayBaseClient` mutates the `http.BaseRequest` it sends to inject
   `X-Amzn-Trace-Id`; callers should treat request instances as single-use.
+- `XRay.httpClientFor(tracer, {inner})` is a convenience that wraps an
+  `http.Client` with `XRayBaseClient` — the supported path for tracing
+  `package:http`-based AWS SDKs (`aws_client` / the agilord `aws_*_api`
+  packages) that accept an `http.Client`. AWS-aware naming and resource
+  extraction apply automatically for `*.amazonaws.com` hosts.
 
 ### Avoiding double instrumentation
 
@@ -109,12 +123,15 @@ For exact runtime contracts and edge-case behavior, see
 - Instead of emitting a top-level segment, it emits an independent subsegment document parented to Lambda's auto-created function segment.
 - `encodeSubsegmentDoc` injects `type: subsegment`, `parent_id`, and `trace_id` required by X-Ray.
 - This avoids competing with the Lambda runtime's root segment and preserves trace linkage.
+- `LambdaTraceCapture` captures the `Lambda-Runtime-Trace-Id` header (the authoritative trace id for Lambda's auto-created segment) by overriding the global `package:http` client for a zone via `http.runWithClient`. Its `context()` returns a parsed `LambdaTraceContext` (`traceId`, `parentId`, `sampled`) to pass to `runLambda` — a capture path that needs no runtime fork. The runtime-specific handler glue stays with the caller, since it depends on the chosen runtime package. **Do not** use the `_X_AMZN_TRACE_ID` env var (it carries the incoming request's trace, breaking parent→child linkage).
 
 ## Incoming request tracing
 
 - `handleTraced` provides request-side tracing for `dart:io` servers.
 - It extracts `x-amzn-trace-id`, reuses the upstream trace ID and parent ID when present, and runs the handler inside `XRayTracer.run`.
-- It attempts to set the outgoing trace header on the response for downstream propagation.
+- It forwards the request method and path into `XRayTracer.run`, so path/method-based sampling rules can match (rather than the `UNKNOWN` / `/` defaults).
+- It records request (`method`, `url`, `traced`) and response (`status`, `content_length`) data on the segment's `http` block via `XRayTracer.recordSegmentHttp`, so the node appears in the X-Ray service map. `content_length` reflects the length the handler declared on the response (absent when unset), not bytes written. When the handler throws before setting a status, the response block is omitted so a faulted segment is not mislabelled with the `dart:io` default `200`.
+- It attempts to set the outgoing trace header on the response for downstream propagation. The sampling decision is read inside the run zone so an unsampled trace is correctly marked `Sampled=0`.
 
 ## Sampling
 
