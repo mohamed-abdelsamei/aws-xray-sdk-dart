@@ -6,6 +6,7 @@ import 'models/subsegment.dart';
 import 'models/trace_id.dart';
 import 'sampling/fixed_rate_sampler.dart';
 import 'sampling/sampling_strategy.dart';
+import 'sender/noop_sender.dart';
 import 'sender/segment_encoder.dart';
 import 'sender/sender.dart';
 import 'sender/udp_sender.dart';
@@ -39,6 +40,33 @@ enum ContextMissingPolicy {
   logError,
   runtimeError,
 }
+
+// The process-wide default tracer, or null until one is installed (see
+// [defaultTracer] / [XRay.configure]). Lives here, not on the XRay facade, so
+// XRayBaseClient can resolve it without importing the facade (avoiding an
+// import cycle).
+XRayTracer? _defaultTracer;
+XRayTracer? _noopTracer;
+
+/// The process-wide default [XRayTracer]: the installed tracer, or a shared
+/// no-op (discards everything) when none has been installed. Instrumentation
+/// resolves this so it can run unconditionally and simply do nothing when
+/// tracing is unconfigured.
+///
+/// Prefer the `XRay.tracer` / `XRay.configure` API over using this directly.
+XRayTracer get defaultTracer =>
+    _defaultTracer ??
+    (_noopTracer ??= XRayTracer(
+      serviceName: 'unconfigured',
+      sender: NoopSender(),
+      sampling: FixedRateSampler(0.0),
+    ));
+
+/// Installs (or clears, with null) the process-wide default tracer.
+set defaultTracer(XRayTracer? value) => _defaultTracer = value;
+
+/// Whether a real (non-no-op) default tracer has been installed.
+bool get isDefaultTracerConfigured => _defaultTracer != null;
 
 /// Central X-Ray tracing context.
 ///
@@ -319,6 +347,20 @@ final class XRayTracer {
       return;
     }
     scope.annotate(key, value);
+  }
+
+  /// Adds every entry of [annotations] to the entity currently being traced.
+  ///
+  /// A bulk form of [annotate] (same key/value sanitization rules). The context
+  /// is resolved once: if there is no active trace, the whole batch is dropped
+  /// and [contextMissingPolicy] is applied a single time.
+  void annotateAll(Map<String, Object> annotations) {
+    final scope = _currentScope;
+    if (scope == null) {
+      _handleContextMissing();
+      return;
+    }
+    annotations.forEach(scope.annotate);
   }
 
   /// Adds non-indexed metadata to the entity currently being traced.
