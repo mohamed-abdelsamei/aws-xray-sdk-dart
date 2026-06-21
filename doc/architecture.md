@@ -22,6 +22,7 @@ For exact runtime contracts and edge-case behavior, see
   - manages active segment/subsegment state via Dart `Zone`.
   - exposes `run`, `runLambda`, `beginSegment`, `closeSegment`, `beginSubsegment`, `endSubsegment`, and `failSubsegment`.
   - `captureAsync(name, fn)` runs a block as a **nested** subsegment, and `annotate` / `addMetadata` mutate the entity currently being traced.
+  - `currentSegment` / `currentTraceId` read the active trace context inside a `run` / `runLambda` zone (both `null` outside one); `recordSegmentHttp` attaches HTTP request/response data to the root segment.
 
 - `TraceContext`
   - the live handle passed to a `captureAsync` block: `annotate`, `addMetadata`, `setError`, `setFault`.
@@ -37,6 +38,7 @@ For exact runtime contracts and edge-case behavior, see
 
 - `TraceId`, `Segment`, `Subsegment` represent X-Ray trace documents.
 - `HttpData`, `AwsData`, `Cause` model X-Ray metadata blocks.
+- Both `Segment` and `Subsegment` carry an optional `http` block (`HttpData`); on the root segment it is populated by the server middleware.
 - `Segment` serialization supports split UDP payloads for large traces.
 
 ### Transport
@@ -114,7 +116,9 @@ For exact runtime contracts and edge-case behavior, see
 
 - `handleTraced` provides request-side tracing for `dart:io` servers.
 - It extracts `x-amzn-trace-id`, reuses the upstream trace ID and parent ID when present, and runs the handler inside `XRayTracer.run`.
-- It attempts to set the outgoing trace header on the response for downstream propagation.
+- It forwards the request method and path into `XRayTracer.run`, so path/method-based sampling rules can match (rather than the `UNKNOWN` / `/` defaults).
+- It records request (`method`, `url`, `traced`) and response (`status`, `content_length`) data on the segment's `http` block via `XRayTracer.recordSegmentHttp`, so the node appears in the X-Ray service map. `content_length` reflects the length the handler declared on the response (absent when unset), not bytes written. When the handler throws before setting a status, the response block is omitted so a faulted segment is not mislabelled with the `dart:io` default `200`.
+- It attempts to set the outgoing trace header on the response for downstream propagation. The sampling decision is read inside the run zone so an unsampled trace is correctly marked `Sampled=0`.
 
 ## Sampling
 
