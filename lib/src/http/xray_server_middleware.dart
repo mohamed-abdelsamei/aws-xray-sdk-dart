@@ -7,7 +7,7 @@ import '../trace_header.dart';
 import '../tracer.dart';
 
 /// Extracts X-Ray trace context from an incoming HTTP request's
-/// `X-Amzn-Trace-Id` header and runs [handler] inside [tracer.run].
+/// `X-Amzn-Trace-Id` header and runs [handler] inside [XRayTracer.run].
 ///
 /// If the header carries a `Parent=` (segment ID from the upstream service),
 /// it is set on the segment so the X-Ray service map correctly links this

@@ -1,8 +1,8 @@
-import 'dart:async';
-
 import 'package:http/http.dart' as http;
 
 import '../models/trace_id.dart';
+// Imported for dartdoc references to [XRayTracer.run] / [XRayTracer.runLambda].
+import '../tracer.dart';
 
 /// Parsed X-Ray trace context for a single Lambda invocation, taken from the
 /// `Lambda-Runtime-Trace-Id` header of the Runtime API `/invocation/next`
