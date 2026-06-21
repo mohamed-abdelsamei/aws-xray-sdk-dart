@@ -21,7 +21,7 @@ For exact runtime contracts and edge-case behavior, see
   - central trace context for one service instance.
   - manages active segment/subsegment state via Dart `Zone`.
   - exposes `run`, `runLambda`, `beginSegment`, `closeSegment`, `beginSubsegment`, `endSubsegment`, and `failSubsegment`.
-  - `captureAsync(name, fn)` runs a block as a **nested** subsegment, and `annotate` / `addMetadata` mutate the entity currently being traced.
+  - `captureAsync(name, fn)` runs a block as a **nested** subsegment, and `annotate` / `annotateAll` / `addMetadata` mutate the entity currently being traced.
   - `currentSegment` / `currentTraceId` read the active trace context inside a `run` / `runLambda` zone (both `null` outside one); `recordSegmentHttp` attaches HTTP request/response data to the root segment.
 
 - `TraceContext`
@@ -30,9 +30,12 @@ For exact runtime contracts and edge-case behavior, see
 
 - `XRay`
   - facade for integration helpers.
+  - `configure({fromEnv, serviceName, sampling, tracer, patchDartIoHttp})` — one-call, **idempotent** setup: parses `AWS_XRAY_DAEMON_ADDRESS` (IPv6-safe) and `AWS_LAMBDA_FUNCTION_NAME`, installs the process-wide default tracer, and patches HTTP. `reset()` returns to the unconfigured state.
+  - `tracer` getter/setter — the process-wide default `XRayTracer`; a **no-op** that discards everything until configured, so instrumentation runs unconditionally. `isConfigured` reports whether a real tracer is installed.
   - `patchHttp(tracer)` and `unpatchHttp()` for global `dart:io` HTTP patching.
   - `untracedHttpClient()` to build an unwrapped transport when tracing should be avoided.
-  - `httpClientFor(tracer)` to wrap a `package:http` client (for `aws_client` / `aws_*_api`).
+  - `httpClientFor(tracer)` / `aws()` to wrap a `package:http` client (for `aws_client` / `aws_*_api`); `aws()` uses the global default tracer.
+  - `runLambdaInvocation(capture, name, fn)` — runs one Lambda invocation, parenting under the function facade when a header was captured or starting a fresh segment otherwise.
   - `registerClient` / `fromClient` for Smithy AWS SDK client wrapping.
 
 - `LambdaTraceCapture`

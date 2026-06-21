@@ -67,6 +67,27 @@ Future<void> processOrder(String orderId) {
 }
 ```
 
+### Zero-config setup
+
+`XRay.configure()` builds a tracer from the standard AWS environment
+(`AWS_XRAY_DAEMON_ADDRESS`, `AWS_LAMBDA_FUNCTION_NAME`), installs it as the
+process-wide default (`XRay.tracer`), and patches `dart:io` HTTP — in one call.
+It is **idempotent**, so it's safe to call from multiple entry points.
+
+```dart
+void main() {
+  XRay.configure(); // reads env, installs the global tracer, patches HTTP
+
+  // Anywhere else, with no tracer threading:
+  final ddb = DynamoDB(region: 'us-east-1', client: XRay.aws());
+  // XRay.tracer is the configured tracer; until configure() runs it is a
+  // no-op that discards everything, so instrumentation is safe either way.
+}
+```
+
+Override any piece: `XRay.configure(serviceName: 'svc', sampling: ReservoirSampler())`.
+Use `XRay.reset()` to return to the unconfigured (no-op) state, e.g. in tests.
+
 ---
 
 ## HTTP tracing
