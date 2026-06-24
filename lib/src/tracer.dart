@@ -55,12 +55,7 @@ XRayTracer? _noopTracer;
 ///
 /// Prefer the `XRay.tracer` / `XRay.configure` API over using this directly.
 XRayTracer get defaultTracer =>
-    _defaultTracer ??
-    (_noopTracer ??= XRayTracer(
-      serviceName: 'unconfigured',
-      sender: NoopSender(),
-      sampling: FixedRateSampler(0.0),
-    ));
+    _defaultTracer ?? (_noopTracer ??= XRayTracer._noop());
 
 /// Installs (or clears, with null) the process-wide default tracer.
 set defaultTracer(XRayTracer? value) => _defaultTracer = value;
@@ -82,13 +77,51 @@ final class XRayTracer {
     this.contextMissingPolicy = ContextMissingPolicy.ignore,
     String daemonHost = '127.0.0.1',
     int daemonPort = 2000,
+    this.onSampledDrop,
+    this.onSendError,
   })  : _sender = sender ?? UdpSender(host: daemonHost, port: daemonPort),
-        _sampling = sampling ?? FixedRateSampler(0.05);
+        _sampling = sampling ?? FixedRateSampler(0.05),
+        _failOpen = true;
+
+  /// Builds the shared no-op tracer. It never emits, so [isSampled] fails
+  /// **closed** off-zone — keeping the outgoing `Sampled=` header consistent
+  /// with the (absent) emission instead of advertising `Sampled=1` for a
+  /// segment that will never arrive.
+  XRayTracer._noop()
+      : serviceName = 'unconfigured',
+        contextMissingPolicy = ContextMissingPolicy.ignore,
+        _sender = NoopSender(),
+        _sampling = FixedRateSampler(0.0),
+        _failOpen = false,
+        onSampledDrop = null,
+        onSendError = null;
 
   final String serviceName;
-  final ContextMissingPolicy contextMissingPolicy;
+
+  /// Called when a segment is dropped because the trace was **not sampled**
+  /// (an intentional drop). Lets callers distinguish this from a transport
+  /// failure ([onSendError]); both otherwise leave no trace. Must not throw.
+  final void Function(Segment segment)? onSampledDrop;
+
+  /// Called when [Sender.send] throws while finalizing a sampled segment (an
+  /// **unintentional** drop — daemon down, serialization error). The error is
+  /// still swallowed so tracing never faults the app; this is the observability
+  /// hook. Must not throw.
+  final void Function(Segment segment, Object error)? onSendError;
+
+  /// How a recorded subsegment with no active trace context is handled.
+  ///
+  /// Mutable so tests (and runtime diagnostics) can toggle the policy without
+  /// rebuilding the tracer — e.g. flip to [ContextMissingPolicy.runtimeError]
+  /// to assert that a code path is always inside a [run] zone.
+  ContextMissingPolicy contextMissingPolicy;
   final Sender _sender;
   final SamplingStrategy _sampling;
+
+  /// Whether [isSampled] returns `true` (fail-open) when read outside a [run]
+  /// zone. True for real tracers (so manually constructed segments are not
+  /// silently dropped); false for the no-op (which never emits anyway).
+  final bool _failOpen;
 
   /// Runs [fn] with [segment] as the active trace context.
   ///
@@ -170,17 +203,23 @@ final class XRayTracer {
       fn,
       sampled: sampled,
       onComplete: (root) async {
-        // The handler span is a real subsegment: it carries nested children,
-        // any annotations/metadata set during the invocation, and a fault when
-        // the handler throws. `namespace` is dropped — a Lambda handler span is
-        // not an `aws`/`remote` downstream call.
+        if (!sampled) {
+          _safeNotify(() => onSampledDrop?.call(virtualSegment));
+          return;
+        }
         final doc = root.toSubsegment().toJson()..remove('namespace');
         final packet = encodeSubsegmentDoc(
           doc,
           lambdaParentId,
           traceId.toString(),
         );
-        if (sampled) await _sender.sendPackets([packet]);
+        try {
+          await _sender.sendPackets([packet]);
+        } catch (e) {
+          // Same containment + observability contract as closeSegment: never
+          // fault the invocation, but surface the unintentional drop.
+          _safeNotify(() => onSendError?.call(virtualSegment, e));
+        }
       },
     );
   }
@@ -448,10 +487,12 @@ final class XRayTracer {
 
   /// Whether the current zone's trace is being sampled.
   ///
-  /// Returns `true` outside of any [run] zone (fail-open: always sample when
-  /// there is no active context, so manually constructed segments are not
-  /// silently dropped).
-  bool get isSampled => (Zone.current[_sampledKey] as bool?) ?? true;
+  /// Inside a [run] zone this returns the decision made at entry. Outside any
+  /// zone it falls back to [_failOpen]: a real tracer fails **open** (`true`)
+  /// so manually constructed segments are not silently dropped, while the no-op
+  /// tracer fails **closed** (`false`) so it never advertises `Sampled=1` for a
+  /// segment it will never emit.
+  bool get isSampled => (Zone.current[_sampledKey] as bool?) ?? _failOpen;
 
   /// Serializes and sends [segment] if the current zone's sampling decision
   /// is `true`.
@@ -462,12 +503,26 @@ final class XRayTracer {
   /// A transport or serialization failure is swallowed — finalizing a segment
   /// (whether via [run] or a direct call) must never fault the application.
   Future<void> closeSegment(Segment segment) async {
-    if (!isSampled) return;
+    if (!isSampled) {
+      _safeNotify(() => onSampledDrop?.call(segment));
+      return;
+    }
     try {
       await _sender.send(segment);
-    } catch (_) {
-      // Intentionally ignored — tracing must never break the application.
+    } catch (e) {
+      // Intentionally ignored — tracing must never break the application — but
+      // surfaced via the observability hook so an unintentional drop is not
+      // indistinguishable from a sampled-out one.
+      _safeNotify(() => onSendError?.call(segment, e));
     }
+  }
+
+  /// Invokes an observability callback, swallowing any throw it makes so a
+  /// misbehaving hook can never fault the traced operation.
+  void _safeNotify(void Function() notify) {
+    try {
+      notify();
+    } catch (_) {/* a hook must never break tracing */}
   }
 
   /// Creates a new segment with a fresh trace ID.

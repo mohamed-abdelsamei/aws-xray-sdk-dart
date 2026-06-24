@@ -6,7 +6,7 @@ import '../models/subsegment.dart';
 import '../trace_header.dart';
 import '../trace_suppression.dart';
 import '../tracer.dart';
-import '../utils.dart' show awsDomainSuffix;
+import '../utils.dart' show isAwsHost;
 
 /// Wraps a `dart:io` [HttpClient] to trace every outbound HTTP request.
 ///
@@ -31,7 +31,7 @@ final class XRayHttpClient implements HttpClient {
       return _inner.openUrl(method, url);
     }
 
-    final namespace = url.host.endsWith(awsDomainSuffix) ? 'aws' : 'remote';
+    final namespace = isAwsHost(url.host) ? 'aws' : 'remote';
     final sub = _tracer.beginSubsegment(url.host, namespace: namespace);
 
     try {

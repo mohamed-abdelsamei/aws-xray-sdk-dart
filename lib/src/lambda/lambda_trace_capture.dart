@@ -1,8 +1,20 @@
+import 'dart:async';
+
 import 'package:http/http.dart' as http;
 
 import '../models/trace_id.dart';
 // Imported for dartdoc references to [XRayTracer.run] / [XRayTracer.runLambda].
 import '../tracer.dart';
+
+/// A single-field mutable holder for the captured header. One is created per
+/// [LambdaTraceCapture.run] zone, so concurrent invocations that each drive
+/// their own `run()` get an isolated capture slot instead of racing on a shared
+/// instance field.
+class _HeaderSlot {
+  String value = '';
+}
+
+const _slotKey = #_xrayLambdaTraceHeaderSlot;
 
 /// Parsed X-Ray trace context for a single Lambda invocation, taken from the
 /// `Lambda-Runtime-Trace-Id` header of the Runtime API `/invocation/next`
@@ -65,27 +77,48 @@ final class LambdaTraceContext {
 /// **Sequential safety:** a Lambda sandbox processes one invocation at a time.
 /// The header is written when the runtime polls `/invocation/next` and read by
 /// the handler before the next poll, so there is no interleaving within a
-/// single sandbox. Use one [LambdaTraceCapture] per runtime loop; it is not
-/// designed for concurrent invocations sharing an instance.
+/// single sandbox.
+///
+/// **Concurrency:** the captured header is stored in a zone-local slot
+/// established by [run], not on the instance, so two invocations that each drive
+/// their own [run] (custom or batched runtimes, test harnesses) read isolated
+/// headers and cannot observe each other's. [context] additionally snapshots the
+/// header once, so its parsed fields are always internally consistent.
 final class LambdaTraceCapture {
   LambdaTraceCapture({http.Client Function()? innerFactory})
       : _innerFactory = innerFactory ?? http.Client.new;
 
   final http.Client Function() _innerFactory;
 
-  // The most recently captured raw header value. Empty until the first
-  // /invocation/next response carrying the header is seen.
-  String _rawHeader = '';
+  // Fallback capture slot for calls made outside a [run] zone (e.g. direct
+  // unit tests of `_capture`). Within a `run` zone the per-zone slot is used
+  // instead, so concurrent invocations do not share this field.
+  final _HeaderSlot _fallback = _HeaderSlot();
+
+  // The slot the current call should read/write: the zone-local one when inside
+  // [run], otherwise the shared fallback.
+  _HeaderSlot get _slot =>
+      (Zone.current[_slotKey] as _HeaderSlot?) ?? _fallback;
 
   /// The raw `Lambda-Runtime-Trace-Id` header last seen, or an empty string if
   /// none has been captured yet.
-  String get rawHeader => _rawHeader;
+  String get rawHeader => _slot.value;
 
   /// Runs [fn] (typically the runtime's invocation loop) inside a zone whose
   /// global `package:http` client captures the trace header from every
   /// response. Returns whatever [fn] returns.
-  Future<T> run<T>(Future<T> Function() fn) =>
-      http.runWithClient(fn, () => _CapturingClient(_innerFactory(), this));
+  ///
+  /// Each `run` establishes its own zone-local capture slot, so two invocations
+  /// driving separate `run` calls never read each other's header even if they
+  /// interleave.
+  Future<T> run<T>(Future<T> Function() fn) {
+    final slot = _HeaderSlot();
+    return runZoned(
+      () =>
+          http.runWithClient(fn, () => _CapturingClient(_innerFactory(), this)),
+      zoneValues: {_slotKey: slot},
+    );
+  }
 
   /// The parsed trace context for the current invocation, derived from the most
   /// recently captured header.
@@ -93,14 +126,26 @@ final class LambdaTraceCapture {
   /// When no header has been captured, [LambdaTraceContext.parentId] is null
   /// and [LambdaTraceContext.traceId] is freshly generated — the caller should
   /// then start a fresh top-level segment rather than call `runLambda`.
-  LambdaTraceContext context() => LambdaTraceContext(
-        traceId: TraceId.tryParse(_rawHeader) ?? TraceId.generate(),
-        parentId: TraceId.parseParentId(_rawHeader),
-        sampled: TraceId.parseSampled(_rawHeader) ?? true,
-      );
+  ///
+  /// The header is snapshotted once so the three parsed fields are always
+  /// internally consistent, even if a concurrent `/invocation/next` poll
+  /// overwrites the captured value mid-call (custom/batched runtimes).
+  LambdaTraceContext context() {
+    final header = _slot.value;
+    return LambdaTraceContext(
+      traceId: TraceId.tryParse(header) ?? TraceId.generate(),
+      parentId: TraceId.parseParentId(header),
+      sampled: TraceId.parseSampled(header) ?? true,
+    );
+  }
 
   void _capture(String? header) {
-    if (header != null && header.isNotEmpty) _rawHeader = header;
+    if (header == null || header.isEmpty) return;
+    // Write the active slot (zone-local inside `run`, else the fallback) for
+    // isolated in-flight reads, and always mirror to the fallback so reads made
+    // after `run` returns (e.g. the `rawHeader` getter) still see the value.
+    _slot.value = header;
+    _fallback.value = header;
   }
 }
 

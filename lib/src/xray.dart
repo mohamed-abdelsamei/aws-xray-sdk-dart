@@ -38,6 +38,30 @@ abstract final class XRay {
   /// the [tracer] setter.
   static bool get isConfigured => isDefaultTracerConfigured;
 
+  /// Adds indexed [annotations] to the span currently being traced, using the
+  /// process-wide [tracer].
+  ///
+  /// A facade over `XRay.tracer.annotateAll(...)` so application code can add
+  /// request-scoped annotations (request id, operation, environment, …) without
+  /// importing or holding an [XRayTracer]. Annotations are searchable via X-Ray
+  /// filter expressions; keys and values are sanitized per [XRayTracer.annotate].
+  ///
+  /// No-ops safely when there is no active trace, so it is always safe to call:
+  /// ```dart
+  /// XRay.annotate({'operationId': id, 'environment': env});
+  /// ```
+  static void annotate(Map<String, Object> annotations) =>
+      defaultTracer.annotateAll(annotations);
+
+  /// Adds non-indexed [value] under [key] to the span currently being traced,
+  /// using the process-wide [tracer].
+  ///
+  /// A facade over `XRay.tracer.addMetadata(...)`. Metadata is not searchable
+  /// but may be any JSON-serializable object. No-ops safely off-trace.
+  static void metadata(String key, Object value,
+          {String namespace = 'default'}) =>
+      defaultTracer.addMetadata(key, value, namespace: namespace);
+
   /// One-call setup: builds a tracer, installs it as the process-wide default
   /// ([tracer]), and patches `dart:io` HTTP ([patchHttp]).
   ///
@@ -220,25 +244,28 @@ abstract final class XRay {
   /// );
   /// ```
   ///
-  /// [inner] defaults to a fresh `http.Client()`. [tracer] defaults to the
-  /// process-wide [tracer] (the no-op until [configure] runs). Tracing is gated
-  /// on the active [XRayTracer.run] zone: outside one, requests pass through
-  /// untraced.
+  /// [inner] defaults to a fresh `http.Client()`. When [tracer] is null the
+  /// process-wide [tracer] is resolved **per request**, so a client handed out
+  /// before [configure] runs still traces afterward — order-independent. Pass an
+  /// explicit [tracer] only to pin one. Tracing is gated on the active
+  /// [XRayTracer.run] zone: outside one, requests pass through untraced.
   static http.Client httpClientFor(XRayTracer? tracer, {http.Client? inner}) =>
-      XRayBaseClient(inner ?? http.Client(), tracer ?? defaultTracer);
+      XRayBaseClient(inner ?? http.Client(), tracer);
 
   /// Returns a pre-wrapped `http.Client` for AWS SDKs, using the process-wide
   /// default [tracer].
   ///
   /// Zero-config shorthand for `httpClientFor(null, inner: inner)` — hand it to
   /// any `aws_client` / `aws_*_api` client's `client:` argument so all its
-  /// calls are traced once `XRay.configure` has run:
+  /// calls are traced once `XRay.configure` has run. The tracer is resolved per
+  /// request, so this is safe to call before `configure` (e.g. in a field
+  /// initializer or constructor):
   ///
   /// ```dart
   /// final ddb = DynamoDB(region: 'us-east-1', client: XRay.aws());
   /// ```
   static http.Client aws({http.Client? inner}) =>
-      XRayBaseClient(inner ?? http.Client(), defaultTracer);
+      XRayBaseClient(inner ?? http.Client());
 
   /// Runs a single Lambda invocation [fn] correctly traced, using the trace
   /// context [capture] sniffed from the runtime's `Lambda-Runtime-Trace-Id`

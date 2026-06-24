@@ -25,6 +25,19 @@ final class TraceId {
     return TraceId._(root);
   }
 
+  /// The validated `Root` trace ID from an `X-Amzn-Trace-Id` header, as a
+  /// plain string, or `null` if the header carries no valid trace ID.
+  ///
+  /// The common case for log enrichment: callers want the root id as a string
+  /// without constructing a [TraceId]. Equivalent to `tryParse(header)?.toString()`,
+  /// so the same validation rules apply.
+  ///
+  /// ```dart
+  /// loggingContext['xrayTraceId'] = TraceId.parseRootString(header);
+  /// ```
+  static String? parseRootString(String headerValue) =>
+      tryParse(headerValue)?.toString();
+
   /// The parent segment ID embedded in an `X-Amzn-Trace-Id` header, if any.
   static String? parseParentId(String headerValue) =>
       _extractField(headerValue, 'Parent');

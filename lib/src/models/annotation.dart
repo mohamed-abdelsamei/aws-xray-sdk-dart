@@ -20,8 +20,14 @@
 /// `XRayTracer.addMetadata` for the documented metadata constraints.
 library;
 
+import 'dart:io';
+
 /// Characters X-Ray permits in an annotation key.
 final RegExp _invalidKeyChar = RegExp(r'[^A-Za-z0-9_]');
+
+/// Original keys already warned about, so the diagnostic fires at most once per
+/// distinct key (process-wide) and never floods a hot path.
+final Set<String> _warnedKeys = {};
 
 /// Returns [key] with every character X-Ray disallows in an annotation key
 /// (anything outside `[A-Za-z0-9_]`) replaced by `_`.
@@ -29,10 +35,26 @@ final RegExp _invalidKeyChar = RegExp(r'[^A-Za-z0-9_]');
 /// An empty key — or one made entirely of disallowed characters, which would
 /// sanitize to an empty string — becomes the single placeholder `_` so the
 /// annotation still has a usable, X-Ray-valid key.
+///
+/// When sanitization actually changes the key, a one-time `stderr` diagnostic is
+/// emitted for that key. Sanitization is silent and lossy by design (e.g.
+/// `my-metric` and `my_metric` both become `my_metric` and collide), so the
+/// warning surfaces the collision risk without changing behavior or throwing.
 String sanitizeAnnotationKey(String key) {
   final sanitized = key.replaceAll(_invalidKeyChar, '_');
-  return sanitized.isEmpty ? '_' : sanitized;
+  final result = sanitized.isEmpty ? '_' : sanitized;
+  if (result != key && _warnedKeys.add(key)) {
+    stderr.writeln(
+      'X-Ray: annotation key "$key" sanitized to "$result" — disallowed '
+      'characters were replaced with "_". Distinct keys may now collide; '
+      'use only [A-Za-z0-9_] to avoid this.',
+    );
+  }
+  return result;
 }
+
+/// Clears the warn-once dedup set. Intended for tests.
+void resetAnnotationKeyWarnings() => _warnedKeys.clear();
 
 /// Returns [value] unchanged when it is a valid scalar X-Ray annotation value
 /// (`String`, `bool`, `int`, or `double`); otherwise coerces it to its

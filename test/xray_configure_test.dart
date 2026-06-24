@@ -40,6 +40,18 @@ void main() {
       XRay.tracer = null;
       expect(XRay.isConfigured, isFalse);
     });
+
+    test('no-op tracer fails CLOSED off-zone; real tracer fails open (C4)', () {
+      // Outside any run() zone, the unconfigured no-op must report not-sampled
+      // so instrumentation never injects Sampled=1 for a segment it will never
+      // emit. A real tracer keeps the fail-open behavior for manual segments.
+      expect(XRay.tracer.isSampled, isFalse,
+          reason: 'no-op must fail closed off-zone');
+
+      final real = XRayTracer(serviceName: 'svc', sender: _RecordingSender());
+      expect(real.isSampled, isTrue,
+          reason: 'a real tracer fails open off-zone');
+    });
   });
 
   group('XRay.configure', () {
@@ -109,6 +121,60 @@ void main() {
       expect(sender.sent, hasLength(1));
     });
 
+    test('client built BEFORE configure still traces afterward (C1)', () async {
+      final inner = _MockClient(200);
+      // Build the wrapped client while tracing is unconfigured — the common
+      // field-initializer / constructor case. It must bind to whatever tracer
+      // is installed at request time, not the no-op captured at construction.
+      final client = XRay.aws(inner: inner);
+      expect(XRay.isConfigured, isFalse);
+
+      final sender = InMemorySender();
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'svc',
+          sender: sender,
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      // The same pre-built client now resolves the configured tracer per send.
+      expect(client, isA<XRayBaseClient>());
+      final tracer = XRay.tracer;
+      await tracer.run(tracer.beginSegment(), () async {
+        await client.get(Uri.parse('https://example.com/'));
+      });
+      expect(sender.segments, hasLength(1),
+          reason: 'a pre-configure client must trace once configured');
+      expect(sender.segments.single.subsegments, hasLength(1));
+    });
+
+    test('explicit tracer pins and is not overridden by the global', () async {
+      final pinned = InMemorySender();
+      final pinnedTracer = XRayTracer(
+        serviceName: 'pinned',
+        sender: pinned,
+        sampling: FixedRateSampler(1.0),
+      );
+      final client = XRay.httpClientFor(pinnedTracer);
+      expect(client, isA<XRayBaseClient>());
+
+      // Install a different global tracer — the pinned client must ignore it.
+      final global = InMemorySender();
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'global',
+          sender: global,
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      await pinnedTracer.run(pinnedTracer.beginSegment(), () async {});
+      expect(pinned.segments, hasLength(1));
+    });
+
     test('XRayBaseClient(inner) zero-arg resolves the global default tracer',
         () async {
       final sender = _RecordingSender();
@@ -158,6 +224,56 @@ void main() {
     });
   });
 
+  group('XRay.annotate / XRay.metadata facade', () {
+    test('annotate adds entries to the active segment via the global tracer',
+        () async {
+      final sender = InMemorySender();
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'svc',
+          sender: sender,
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      final tracer = XRay.tracer;
+      await tracer.run(tracer.beginSegment(), () async {
+        XRay.annotate({'operationId': 'op-1', 'environment': 'test'});
+      });
+
+      final ann = sender.segments.single.annotations!;
+      expect(ann['operationId'], 'op-1');
+      expect(ann['environment'], 'test');
+    });
+
+    test('metadata adds a namespaced entry to the active segment', () async {
+      final sender = InMemorySender();
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'svc',
+          sender: sender,
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      final tracer = XRay.tracer;
+      await tracer.run(tracer.beginSegment(), () async {
+        XRay.metadata('payload', {'size': 3});
+      });
+
+      final meta = sender.segments.single.metadata!;
+      expect(meta['default']?['payload'], {'size': 3});
+    });
+
+    test('annotate no-ops off-trace and when unconfigured', () {
+      // Unconfigured: the no-op tracer must swallow it without throwing.
+      expect(() => XRay.annotate({'a': 1}), returnsNormally);
+      expect(() => XRay.metadata('k', 'v'), returnsNormally);
+    });
+  });
+
   group('XRay.runLambdaInvocation', () {
     test('with no captured header starts a fresh top-level segment', () async {
       final sender = _RecordingSender();
@@ -186,4 +302,14 @@ void main() {
       expect(seg.containsKey('parent_id'), isFalse);
     });
   });
+}
+
+class _MockClient extends http.BaseClient {
+  _MockClient(this.statusCode);
+
+  final int statusCode;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async =>
+      http.StreamedResponse(Stream.value(utf8.encode('{}')), statusCode);
 }
