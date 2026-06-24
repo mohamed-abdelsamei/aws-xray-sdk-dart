@@ -11,7 +11,7 @@ import '../models/http_data.dart';
 import '../trace_header.dart';
 import '../trace_suppression.dart';
 import '../tracer.dart';
-import '../utils.dart' show awsDomainSuffix;
+import '../utils.dart' show isAwsHost;
 
 /// Wraps [http.Client] to trace every outbound HTTP request through
 /// `package:http`.
@@ -57,30 +57,34 @@ import '../utils.dart' show awsDomainSuffix;
 /// final response = await client.get(Uri.parse('https://api.example.com'));
 /// ```
 final class XRayBaseClient extends http.BaseClient {
-  /// Wraps [inner]. [tracer] defaults to the process-wide [defaultTracer]
-  /// (a no-op until `XRay.configure` / `XRay.tracer` installs one), so
-  /// `XRayBaseClient(http.Client())` works without an explicit tracer.
-  XRayBaseClient(this._inner, [XRayTracer? tracer])
-      : _tracer = tracer ?? defaultTracer;
+  /// Wraps [inner]. When [tracer] is omitted the process-wide [defaultTracer]
+  /// is resolved **per request** (a no-op until `XRay.configure` / `XRay.tracer`
+  /// installs one), so a client built *before* tracing is configured still
+  /// traces once it is. Pass an explicit [tracer] only to pin a specific one.
+  XRayBaseClient(this._inner, [XRayTracer? tracer]) : _pinnedTracer = tracer;
 
   final http.Client _inner;
-  final XRayTracer _tracer;
+
+  /// The tracer pinned at construction, or null to resolve [defaultTracer]
+  /// fresh on every [send].
+  final XRayTracer? _pinnedTracer;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    final segment = _tracer.currentSegment;
+    final tracer = _pinnedTracer ?? defaultTracer;
+    final segment = tracer.currentSegment;
     if (segment == null) return _inner.send(request);
 
-    final isAws = request.url.host.endsWith(awsDomainSuffix);
+    final isAws = isAwsHost(request.url.host);
     final namespace = isAws ? 'aws' : 'remote';
     final subName = isAws ? _serviceName(request.url.host) : request.url.host;
 
-    var sub = _tracer.beginSubsegment(subName, namespace: namespace);
+    var sub = tracer.beginSubsegment(subName, namespace: namespace);
 
     request.headers['X-Amzn-Trace-Id'] = buildTraceHeader(
       traceId: segment.traceId.toString(),
       segmentId: sub.id,
-      sampled: _tracer.isSampled,
+      sampled: tracer.isSampled,
     );
 
     try {
@@ -112,7 +116,7 @@ final class XRayBaseClient extends http.BaseClient {
           sub = sub.withCause(error.cause);
           if (isThrottleErrorCode(error.type)) sub = sub.withThrottle();
         }
-        _tracer.endSubsegment(sub);
+        tracer.endSubsegment(sub);
         return http.StreamedResponse(
           Stream.value(bytes),
           response.statusCode,
@@ -126,7 +130,7 @@ final class XRayBaseClient extends http.BaseClient {
       // Register the enriched sub so that if the caller never drains the body
       // (HEAD, 204/304, status-only early return), the finalize-time sweep
       // emits this document — with status/aws data — instead of a bare span.
-      _tracer.updatePending(sub);
+      tracer.updatePending(sub);
 
       var closed = false;
       final tracedSub = sub;
@@ -136,14 +140,14 @@ final class XRayBaseClient extends http.BaseClient {
         handleError: (e, st, sink) {
           if (!closed) {
             closed = true;
-            _tracer.failSubsegment(tracedSub, e);
+            tracer.failSubsegment(tracedSub, e);
           }
           sink.addError(e, st);
         },
         handleDone: (sink) {
           if (!closed) {
             closed = true;
-            _tracer.endSubsegment(tracedSub);
+            tracer.endSubsegment(tracedSub);
           }
           sink.close();
         },
@@ -168,7 +172,7 @@ final class XRayBaseClient extends http.BaseClient {
         ),
       ));
       if (awsData != null) failed = failed.withAws(awsData);
-      _tracer.failSubsegment(failed, e);
+      tracer.failSubsegment(failed, e);
       rethrow;
     }
   }
@@ -328,13 +332,61 @@ final class XRayBaseClient extends http.BaseClient {
     );
   }
 
-  // TODO: Replace regex with proper XML parsing. The current approach is
-  // fragile — it breaks on namespaces, CDATA sections, and encoding quirks.
-  // AWS query-protocol error bodies are simple enough for now, but this will
-  // need hardening for broader XML coverage.
+  /// Extracts the first XML tag body from AWS query-protocol errors.
   static String? _xmlTag(String xml, String tag) {
-    final match = RegExp('<$tag>(.*?)</$tag>', dotAll: true).firstMatch(xml);
-    return match?.group(1)?.trim();
+    final open = RegExp(
+      '<(?:\\w+:)?$tag(?:\\s[^>]*)?>',
+      caseSensitive: false,
+    );
+    final m = open.firstMatch(xml);
+    if (m == null) return null;
+
+    final close = RegExp('</(?:\\w+:)?$tag\\s*>', caseSensitive: false);
+    final cm = close.firstMatch(xml.substring(m.end));
+    if (cm == null) return null;
+
+    var inner = xml.substring(m.end, m.end + cm.start);
+    inner = _unwrapCdata(inner);
+    inner = _decodeXmlEntities(inner).trim();
+    return inner.isEmpty ? null : inner;
+  }
+
+  /// Replaces CDATA sections with their literal contents.
+  static String _unwrapCdata(String s) {
+    if (!s.contains('<![CDATA[')) return s;
+    return s.replaceAllMapped(
+      RegExp(r'<!\[CDATA\[(.*?)\]\]>', dotAll: true),
+      (m) => m.group(1) ?? '',
+    );
+  }
+
+  /// Decodes the five predefined XML entities plus numeric character refs.
+  static String _decodeXmlEntities(String s) {
+    if (!s.contains('&')) return s;
+    return s.replaceAllMapped(RegExp(r'&(#x?[0-9a-fA-F]+|\w+);'), (m) {
+      final e = m.group(1)!;
+      switch (e) {
+        case 'lt':
+          return '<';
+        case 'gt':
+          return '>';
+        case 'amp':
+          return '&';
+        case 'quot':
+          return '"';
+        case 'apos':
+          return "'";
+      }
+      if (e.startsWith('#')) {
+        final isHex = e.startsWith('#x') || e.startsWith('#X');
+        final digits = e.substring(isHex ? 2 : 1);
+        final code = int.tryParse(digits, radix: isHex ? 16 : 10);
+        if (code != null && code >= 0 && code <= 0x10FFFF) {
+          return String.fromCharCode(code);
+        }
+      }
+      return m.group(0)!; // unknown or out-of-range entity: leave as-is
+    });
   }
 
   static String _exceptionId() => XRayException.from(Object()).id;

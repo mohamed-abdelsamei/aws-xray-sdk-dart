@@ -99,6 +99,21 @@ final class TraceScope implements TraceContext {
 
   void addChild(Subsegment sub) => _children.add(sub);
 
+  /// Children ordered by start time, so concurrent `captureAsync` spans that
+  /// close (and are appended) out of order still render as a chronological
+  /// timeline. Insertion order breaks ties (a stable sort via index decoration),
+  /// so siblings that started in the same instant keep their original order.
+  List<Subsegment> get _orderedChildren {
+    final indexed = [
+      for (var i = 0; i < _children.length; i++) (i, _children[i]),
+    ];
+    indexed.sort((a, b) {
+      final byStart = a.$2.startTime.compareTo(b.$2.startTime);
+      return byStart != 0 ? byStart : a.$1.compareTo(b.$1);
+    });
+    return [for (final e in indexed) e.$2];
+  }
+
   /// Records HTTP request/response data for this scope. Folded onto the
   /// serialized entity by both [applyToSegment] (the `run` path) and
   /// [toSubsegment] (the `runLambda` path). Currently set only on the root by
@@ -141,7 +156,7 @@ final class TraceScope implements TraceContext {
       namespace: namespace,
       startTime: startTime,
     );
-    for (final child in _children) {
+    for (final child in _orderedChildren) {
       sub = sub.addChild(child);
     }
     if (_http != null) sub = sub.withHttp(_http!);
@@ -165,7 +180,7 @@ final class TraceScope implements TraceContext {
     _metadata.forEach((ns, kv) {
       kv.forEach((k, v) => s = s.addMetadata(k, v, namespace: ns));
     });
-    for (final child in _children) {
+    for (final child in _orderedChildren) {
       s = s.addSubsegment(child);
     }
     if (_fault) {

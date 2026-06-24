@@ -1,15 +1,15 @@
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 import 'package:test/test.dart';
 
-/// A fake clock that returns a fixed [DateTime] and can be advanced.
+/// A fake monotonic clock (microseconds) that can be advanced. Mirrors the
+/// `elapsedMicros` seam — production uses a [Stopwatch], which never moves
+/// backward.
 final class _FakeClock {
-  _FakeClock(this._now);
+  int _micros = 0;
 
-  DateTime _now;
+  int call() => _micros;
 
-  DateTime call() => _now;
-
-  void advance(Duration d) => _now = _now.add(d);
+  void advance(Duration d) => _micros += d.inMicroseconds;
 }
 
 void main() {
@@ -39,17 +39,54 @@ void main() {
     });
 
     test('reservoir resets each second', () {
-      final clock = _FakeClock(DateTime.utc(2024, 1, 1));
+      final clock = _FakeClock();
       final sampler = ReservoirSampler(
         reservoirSize: 1,
         fixedRate: 0.0,
-        now: clock.call,
+        elapsedMicros: clock.call,
       );
       expect(sampler.shouldSample(req), isTrue); // second 1, reservoir used
       expect(sampler.shouldSample(req), isFalse); // second 1, above reservoir
 
       clock.advance(const Duration(seconds: 1));
       expect(sampler.shouldSample(req), isTrue); // second 2, reservoir reset
+    });
+
+    test('a sub-second advance does not reset the reservoir', () {
+      final clock = _FakeClock();
+      final sampler = ReservoirSampler(
+        reservoirSize: 1,
+        fixedRate: 0.0,
+        elapsedMicros: clock.call,
+      );
+      expect(sampler.shouldSample(req), isTrue); // reservoir used
+      clock.advance(const Duration(milliseconds: 500)); // still same second
+      expect(sampler.shouldSample(req), isFalse);
+    });
+
+    test('monotonic clock never moves backward, so no spurious reset (H4)', () {
+      // The injected seam models a Stopwatch: time only advances. Even a tiny
+      // forward step that lands in the same whole second must not reset; a
+      // backward step is impossible with the production Stopwatch, so the
+      // wall-clock over-sampling failure mode cannot occur.
+      final clock = _FakeClock();
+      final sampler = ReservoirSampler(
+        reservoirSize: 1,
+        fixedRate: 0.0,
+        elapsedMicros: clock.call,
+      );
+      expect(sampler.shouldSample(req), isTrue); // second 0, reservoir used
+
+      // Many sub-second ticks within the same second: reservoir stays exhausted.
+      for (var i = 0; i < 10; i++) {
+        clock.advance(const Duration(milliseconds: 50));
+        expect(sampler.shouldSample(req), isFalse,
+            reason: 'no reset within the same monotonic second');
+      }
+
+      // Cross into the next second: exactly one reset, one admit.
+      clock.advance(const Duration(milliseconds: 600)); // total > 1s
+      expect(sampler.shouldSample(req), isTrue);
     });
 
     test('reservoirSize=0 falls through to fixedRate', () {

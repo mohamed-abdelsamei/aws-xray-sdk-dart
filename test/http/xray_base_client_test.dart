@@ -185,6 +185,32 @@ void main() {
       expect(sub['namespace'], 'aws');
     });
 
+    test('aws namespace and metadata for China partition endpoints', () async {
+      final inner = _MockClient(200, responseHeaders: {
+        'x-amzn-requestid': 'req-cn',
+      });
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        final req = http.Request(
+          'POST',
+          Uri.parse('https://dynamodb.cn-north-1.amazonaws.com.cn/'),
+        )
+          ..headers['X-Amz-Target'] = 'DynamoDB_20120810.GetItem'
+          ..body = jsonEncode({'TableName': 'users'});
+        await client.send(req);
+      });
+
+      final sub = sender.lastSubs.single as Map;
+      expect(sub['name'], 'DynamoDB');
+      expect(sub['namespace'], 'aws');
+      final aws = sub['aws'] as Map;
+      expect(aws['operation'], 'GetItem');
+      expect(aws['region'], 'cn-north-1');
+      expect(aws['request_id'], 'req-cn');
+    });
+
     test('aws subsegment uses the canonical service name, not the host',
         () async {
       final inner = _MockClient(200);
@@ -340,6 +366,120 @@ void main() {
       final exc = ((sub['cause'] as Map)['exceptions'] as List).first as Map;
       expect(exc['type'], 'AccessDenied');
       expect(exc['message'], contains('sns:Publish'));
+    });
+
+    test('parses namespaced XML error tags', () async {
+      final inner = _MockClient(
+        400,
+        body: '<ns2:ErrorResponse xmlns:ns2="http://x/"><ns2:Error>'
+            '<ns2:Code>Throttling</ns2:Code>'
+            '<ns2:Message>Rate exceeded</ns2:Message>'
+            '</ns2:Error></ns2:ErrorResponse>',
+      );
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.post(
+          Uri.parse('https://sns.us-east-1.amazonaws.com/'),
+          body: 'Action=Publish',
+        );
+      });
+
+      final exc = ((sender.lastSubs.first as Map)['cause'] as Map)['exceptions']
+          as List;
+      expect((exc.first as Map)['type'], 'Throttling');
+      expect((exc.first as Map)['message'], 'Rate exceeded');
+    });
+
+    test('parses XML error tags carrying attributes', () async {
+      final inner = _MockClient(
+        403,
+        body: '<Error><Code attr="x">AccessDenied</Code>'
+            '<Message xml:lang="en">Nope</Message></Error>',
+      );
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.post(Uri.parse('https://sns.us-east-1.amazonaws.com/'),
+            body: 'Action=Publish');
+      });
+
+      final exc = ((sender.lastSubs.first as Map)['cause'] as Map)['exceptions']
+          as List;
+      expect((exc.first as Map)['type'], 'AccessDenied');
+      expect((exc.first as Map)['message'], 'Nope');
+    });
+
+    test('unwraps CDATA and decodes entities in XML error messages', () async {
+      final inner = _MockClient(
+        400,
+        body: '<Error><Code>Invalid</Code>'
+            '<Message><![CDATA[a < b & c]]></Message></Error>',
+      );
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.post(Uri.parse('https://sns.us-east-1.amazonaws.com/'),
+            body: 'Action=Publish');
+      });
+
+      final exc = ((sender.lastSubs.first as Map)['cause'] as Map)['exceptions']
+          as List;
+      expect((exc.first as Map)['type'], 'Invalid');
+      expect((exc.first as Map)['message'], 'a < b & c');
+    });
+
+    test('out-of-range numeric XML entity does not crash the request',
+        () async {
+      // &#1114112; is > 0x10FFFF — String.fromCharCode would throw RangeError.
+      // The error body must still flow through without faulting the call.
+      final inner = _MockClient(
+        400,
+        body: '<Error><Code>Invalid</Code>'
+            '<Message>bad &#1114112; char</Message></Error>',
+      );
+      final client = XRayBaseClient(inner, tracer);
+
+      late int status;
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        // Must not throw.
+        final res = await client.post(
+          Uri.parse('https://sns.us-east-1.amazonaws.com/'),
+          body: 'Action=Publish',
+        );
+        status = res.statusCode;
+      });
+
+      expect(status, 400,
+          reason: 'response is delivered, not turned into a throw');
+      final exc = ((sender.lastSubs.first as Map)['cause'] as Map)['exceptions']
+          as List;
+      expect((exc.first as Map)['type'], 'Invalid');
+      // The unconvertible entity is left literal rather than crashing.
+      expect((exc.first as Map)['message'], contains('&#1114112;'));
+    });
+
+    test('falls back to header type when XML has no Code tag', () async {
+      final inner = _MockClient(
+        400,
+        body: '<html><body>gateway error</body></html>',
+        responseHeaders: {'x-amzn-errortype': 'ServiceUnavailable:'},
+      );
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.post(Uri.parse('https://sns.us-east-1.amazonaws.com/'),
+            body: 'Action=Publish');
+      });
+
+      final exc = ((sender.lastSubs.first as Map)['cause'] as Map)['exceptions']
+          as List;
+      expect((exc.first as Map)['type'], 'ServiceUnavailable');
     });
 
     test('aws error body is still readable by the caller', () async {

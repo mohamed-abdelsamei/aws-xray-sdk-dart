@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.3.0-beta.2
+
+Second beta of the 0.3.0 line. This release tightens the beta.1 APIs and fixes
+trace-fidelity edge cases found during integration testing.
+
+### Added
+
+- `InMemorySender`, exported from the package barrel, for tests that need to
+  assert on emitted segments or Lambda packets without UDP or tracer mocks.
+- `XRay.annotate(Map<String, Object>)` and `XRay.metadata(key, value)` facade
+  helpers for adding data through the process-wide tracer.
+- `TraceId.parseRootString(header)` for log-enrichment callers that only need
+  the validated root trace id as a string.
+- `XRayTracer.onSampledDrop` and `XRayTracer.onSendError` hooks to distinguish
+  intentional sampled-out drops from send failures without faulting traced code.
+
+### Changed
+
+- `XRay.aws()` and `XRayBaseClient(inner)` now resolve the global tracer per
+  request when no explicit tracer is passed. Clients created before
+  `XRay.configure()` now trace after configuration.
+- The unconfigured no-op tracer reports `isSampled == false` outside a trace
+  zone, so it does not advertise `Sampled=1` for traces it will never emit.
+- `contextMissingPolicy` is mutable on `XRayTracer` for runtime diagnostics and
+  tests.
+- `ReservoirSampler` now uses a monotonic `Stopwatch` clock instead of wall time,
+  avoiding sampling-window resets from clock adjustments.
+- Oversized segment encoding recursively splits large subsegment trees into
+  independent subsegment documents where possible.
+- Child subsegments are serialized in start-time order for clearer timelines when
+  concurrent work closes out of order.
+
+### Fixed
+
+- AWS endpoint detection now covers standard, China, ISO, and ISO-B partitions,
+  matching region extraction and preserving AWS metadata/error parsing outside
+  `.amazonaws.com`.
+- AWS query-protocol XML error parsing now handles namespace prefixes, tag
+  attributes, CDATA, XML entities, malformed UTF-8, and out-of-range numeric
+  entities without crashing the request path.
+- `LambdaTraceCapture` stores captured runtime trace headers in a zone-local slot
+  during `run()`, preventing interleaved invocations from reading each other's
+  header.
+- Unsampled `runLambda` invocations now skip subsegment serialization and notify
+  `onSampledDrop` before any send/encoding work.
+- Annotation key sanitization now emits a warn-once diagnostic when keys are
+  changed, making lossy collisions visible.
+
 ## 0.3.0-beta.1
 
 First beta of the 0.3.0 line. Themes: zero-config setup ergonomics, segment-level

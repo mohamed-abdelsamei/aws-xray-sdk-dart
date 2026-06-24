@@ -40,5 +40,17 @@ void main() {
       expect(TraceId.parseSampled('Root=1-abc-def;Sampled=0'), isFalse);
       expect(TraceId.parseSampled('Root=1-abc-def'), isNull);
     });
+
+    test('parseRootString returns the Root id string', () {
+      final id = TraceId.generate();
+      final header = 'Root=$id;Parent=abc123;Sampled=1';
+      expect(TraceId.parseRootString(header), id.toString());
+    });
+
+    test('parseRootString returns null for an invalid header', () {
+      expect(TraceId.parseRootString(''), isNull);
+      expect(TraceId.parseRootString('Parent=abc;Sampled=1'), isNull);
+      expect(TraceId.parseRootString('Root=bad'), isNull);
+    });
   });
 }

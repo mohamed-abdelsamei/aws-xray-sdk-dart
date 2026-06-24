@@ -107,5 +107,32 @@ void main() {
       expect(capture.context().traceId.toString(), t2.toString());
       expect(capture.context().parentId, 'deadbeefdeadbeef');
     });
+
+    test('interleaved run() zones read isolated headers in-zone (H1)',
+        () async {
+      // Each poll returns a distinct header, alternating per call so the two
+      // concurrent invocations capture different values and then interleave.
+      final headers = [
+        'Root=$traceId;Parent=aaaaaaaaaaaaaaaa;Sampled=1',
+        'Root=$traceId;Parent=bbbbbbbbbbbbbbbb;Sampled=1',
+      ];
+      var poll = 0;
+      // One capture instance shared by two concurrent invocation loops.
+      final capture = LambdaTraceCapture(
+        innerFactory: () => _FakeRuntimeClient(headers[poll++ % 2]),
+      );
+
+      Future<String?> invoke() => capture.run(() async {
+            await http.get(Uri.parse('http://localhost/invocation/next'));
+            // Yield so the other invocation polls and overwrites shared state.
+            await Future<void>.delayed(const Duration(milliseconds: 5));
+            // Read inside the zone — must reflect THIS invocation's header.
+            return capture.context().parentId;
+          });
+
+      final results = await Future.wait([invoke(), invoke()]);
+      expect(results, containsAll(['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb']),
+          reason: 'each zone must read its own captured header, not the other');
+    });
   });
 }

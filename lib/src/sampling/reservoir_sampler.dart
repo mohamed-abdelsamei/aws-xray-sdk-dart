@@ -11,6 +11,12 @@ import 'sampling_strategy.dart';
 /// second, matching the X-Ray daemon reservoir algorithm. The [SamplingRequest]
 /// is ignored — the decision depends only on volume and time.
 ///
+/// **Clock safety:** the per-second window is measured with a monotonic
+/// [Stopwatch], not the wall clock, so an NTP correction or VM suspend/resume
+/// that moves `DateTime.now()` backward (or jumps it forward) cannot reset the
+/// reservoir spuriously and over-sample, nor stall it. Time is read as elapsed
+/// microseconds since the sampler was created.
+///
 /// **Isolate safety:** [_currentSecond] and [_takenThisSecond] are mutable
 /// instance state. Each Dart isolate must create its own [ReservoirSampler]
 /// (and its own [XRayTracer]); sharing an instance across isolates is not
@@ -18,26 +24,35 @@ import 'sampling_strategy.dart';
 /// therefore *per isolate*, not per service — N isolates each admit up to
 /// [reservoirSize] requests/second.
 final class ReservoirSampler implements SamplingStrategy {
+  /// Creates a reservoir sampler. [elapsedMicros] is an injectable monotonic
+  /// time source (microseconds since some fixed origin) used only by tests;
+  /// production uses an internal [Stopwatch].
   ReservoirSampler({
     this.reservoirSize = 50,
     this.fixedRate = 0.05,
-    DateTime Function()? now,
-  }) : _now = now ?? DateTime.now;
+    int Function()? elapsedMicros,
+  }) : _elapsedMicros = elapsedMicros ?? _stopwatchClock();
 
   final int reservoirSize;
   final double fixedRate;
-  final DateTime Function() _now;
+  final int Function() _elapsedMicros;
+
+  /// Returns a monotonic clock closure backed by a single started [Stopwatch].
+  static int Function() _stopwatchClock() {
+    final sw = Stopwatch()..start();
+    return () => sw.elapsedMicroseconds;
+  }
 
   static final _rng = Random.secure();
 
-  int _currentSecond = 0;
+  int _currentSecond = -1;
   int _takenThisSecond = 0;
 
   @override
   bool shouldSample(SamplingRequest request) {
-    final now = _now().millisecondsSinceEpoch ~/ 1000;
-    if (now != _currentSecond) {
-      _currentSecond = now;
+    final second = _elapsedMicros() ~/ Duration.microsecondsPerSecond;
+    if (second != _currentSecond) {
+      _currentSecond = second;
       _takenThisSecond = 0;
     }
 

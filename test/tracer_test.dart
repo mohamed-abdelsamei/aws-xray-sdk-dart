@@ -142,6 +142,27 @@ void main() {
       expect(() => strictTracer.endSubsegment(sub), throwsStateError);
     });
 
+    test('contextMissingPolicy is mutable at runtime (M4)', () {
+      final t = XRayTracer(
+        serviceName: 'test-svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+        // Default ignore: closing an orphan does not throw.
+      );
+      expect(
+          () => t.endSubsegment(t.beginSubsegment('orphan')), returnsNormally);
+
+      // Flip the policy without rebuilding the tracer.
+      t.contextMissingPolicy = ContextMissingPolicy.runtimeError;
+      expect(
+          () => t.endSubsegment(t.beginSubsegment('orphan')), throwsStateError);
+
+      // And back again.
+      t.contextMissingPolicy = ContextMissingPolicy.ignore;
+      expect(
+          () => t.endSubsegment(t.beginSubsegment('orphan')), returnsNormally);
+    });
+
     test(
         'recording a subsegment writes a diagnostic when '
         'ContextMissingPolicy.logError is set', () {
@@ -562,4 +583,83 @@ void main() {
       expect(sender.last['cause'], isNotNull);
     });
   });
+
+  group('XRayTracer — drop observability (M1)', () {
+    test('onSampledDrop fires for an unsampled trace, onSendError does not',
+        () async {
+      Segment? dropped;
+      Object? sendErr;
+      final t = XRayTracer(
+        serviceName: 'svc',
+        sender: sender,
+        sampling: FixedRateSampler(0.0), // never sampled
+        onSampledDrop: (s) => dropped = s,
+        onSendError: (s, e) => sendErr = e,
+      );
+
+      await t.run(t.beginSegment(), () async {});
+
+      expect(dropped, isNotNull, reason: 'intentional drop is observable');
+      expect(sendErr, isNull);
+      expect(sender.isEmpty, isTrue, reason: 'nothing was sent');
+    });
+
+    test('onSendError fires when the sender throws on a sampled trace',
+        () async {
+      Object? captured;
+      final t = XRayTracer(
+        serviceName: 'svc',
+        sender: _ThrowingSender(),
+        sampling: FixedRateSampler(1.0), // always sampled
+        onSendError: (s, e) => captured = e,
+      );
+
+      // The send failure must be surfaced but never escape into the operation.
+      await t.run(t.beginSegment(), () async {});
+
+      expect(captured, isA<StateError>());
+    });
+
+    test('a throwing hook never faults the traced operation', () async {
+      final t = XRayTracer(
+        serviceName: 'svc',
+        sender: sender,
+        sampling: FixedRateSampler(0.0),
+        onSampledDrop: (_) => throw Exception('bad hook'),
+      );
+      // Must complete normally despite the misbehaving callback.
+      await expectLater(t.run(t.beginSegment(), () async => 1), completion(1));
+    });
+  });
+
+  group('XRayTracer — subsegment ordering (H5)', () {
+    test('children render in start-time order even when closed out of order',
+        () async {
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        // Open in order a, b, c; close in reverse so insertion order differs
+        // from start order.
+        final a = tracer.beginSubsegment('a');
+        await Future.delayed(const Duration(milliseconds: 5));
+        final b = tracer.beginSubsegment('b');
+        await Future.delayed(const Duration(milliseconds: 5));
+        final c = tracer.beginSubsegment('c');
+        tracer.endSubsegment(c);
+        tracer.endSubsegment(b);
+        tracer.endSubsegment(a);
+      });
+
+      final names = [
+        for (final s in sender.lastSubs) (s as Map)['name'] as String,
+      ];
+      expect(names, ['a', 'b', 'c']);
+    });
+  });
+}
+
+class _ThrowingSender extends Sender {
+  @override
+  Future<void> send(Segment segment) async => throw StateError('daemon down');
+  @override
+  Future<void> close() async {}
 }

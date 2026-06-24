@@ -29,6 +29,26 @@ class _PacketSender extends Sender {
   }
 }
 
+// A sender whose packet delivery always fails, to exercise onSendError.
+class _ThrowingPacketSender extends Sender {
+  @override
+  Future<void> send(Segment segment) async {}
+  @override
+  Future<void> sendPackets(List<List<int>> ps) async =>
+      throw StateError('daemon down');
+  @override
+  Future<void> close() async {}
+}
+
+class _JsonThrowingSender extends Sender {
+  @override
+  Future<void> send(Segment segment) async {}
+  @override
+  Future<void> sendPackets(List<List<int>> ps) async {}
+  @override
+  Future<void> close() async {}
+}
+
 void main() {
   late _PacketSender sender;
   late XRayTracer tracer;
@@ -62,6 +82,27 @@ void main() {
       expect(sender.isEmpty, isTrue);
     });
 
+    test('unsampled invocation notifies drop before serialization', () async {
+      Segment? dropped;
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: _JsonThrowingSender(),
+        onSampledDrop: (s) => dropped = s,
+      );
+
+      await t.runLambda(
+        traceId,
+        parentId,
+        'handler',
+        () async {
+          t.addMetadata('bad', Object());
+        },
+        sampled: false,
+      );
+
+      expect(dropped, isNotNull);
+    });
+
     test('packet is sent even when fn throws', () async {
       await expectLater(
         () => tracer.runLambda(
@@ -73,6 +114,23 @@ void main() {
         throwsException,
       );
       expect(sender.packets, hasLength(1));
+    });
+
+    test('onSendError fires when the lambda packet send fails (M1)', () async {
+      Object? captured;
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: _ThrowingPacketSender(),
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) => captured = e,
+      );
+
+      // The send failure must be surfaced but never escape the invocation.
+      final result =
+          await t.runLambda(traceId, parentId, 'handler', () async => 7);
+
+      expect(result, 7);
+      expect(captured, isA<StateError>());
     });
   });
 

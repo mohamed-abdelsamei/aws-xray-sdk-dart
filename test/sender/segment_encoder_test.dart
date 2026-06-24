@@ -48,5 +48,70 @@ void main() {
         expect(p.length, lessThanOrEqualTo(64 * 1024));
       }
     });
+
+    Map<String, Object?> bodyOf(List<int> payload) {
+      final text = utf8.decode(payload);
+      return jsonDecode(text.substring(text.indexOf('\n') + 1))
+          as Map<String, Object?>;
+    }
+
+    test('split emits a skeleton segment plus independent subsegment docs', () {
+      var segment = Segment.begin(name: 'svc', traceId: TraceId.generate());
+      for (var i = 0; i < 200; i++) {
+        segment = segment.addSubsegment(
+          Subsegment.begin(name: 'op-$i', namespace: 'aws')
+              .annotate('data', 'x' * 500)
+              .close(),
+        );
+      }
+      segment = segment.close();
+
+      final payloads = enc.encode(segment);
+      final skeleton = bodyOf(payloads.first);
+      expect(skeleton['id'], segment.id);
+      expect(skeleton.containsKey('subsegments'), isFalse,
+          reason: 'skeleton must not inline subsegments');
+
+      for (final p in payloads.skip(1)) {
+        final doc = bodyOf(p);
+        expect(doc['type'], 'subsegment');
+        expect(doc['parent_id'], segment.id);
+        expect(doc['trace_id'], segment.traceId.toString());
+      }
+    });
+
+    test('recursively splits a subsegment whose children overflow the cap', () {
+      // One top-level subsegment with many large children: inlined, its own
+      // document exceeds 64 KB, so it must be split into the node + each child
+      // re-parented to it.
+      var big = Subsegment.begin(name: 'parent', namespace: 'aws');
+      for (var i = 0; i < 200; i++) {
+        big = big.addChild(
+          Subsegment.begin(name: 'child-$i', namespace: 'aws')
+              .annotate('data', 'x' * 500)
+              .close(),
+        );
+      }
+      final parentId = big.id;
+      var segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
+          .addSubsegment(big.close())
+          .close();
+
+      final payloads = enc.encode(segment);
+      for (final p in payloads) {
+        expect(p.length, lessThanOrEqualTo(64 * 1024));
+      }
+
+      // The children must be parented to the big subsegment, not the segment.
+      final childDocs = payloads
+          .map(bodyOf)
+          .where((d) => (d['name'] as String?)?.startsWith('child-') ?? false)
+          .toList();
+      expect(childDocs, hasLength(200));
+      for (final d in childDocs) {
+        expect(d['parent_id'], parentId);
+        expect(d['type'], 'subsegment');
+      }
+    });
   });
 }

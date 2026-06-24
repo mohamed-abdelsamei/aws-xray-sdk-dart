@@ -36,6 +36,7 @@ export 'src/models/cause.dart';
 export 'src/sender/sender.dart';
 export 'src/sender/udp_sender.dart';
 export 'src/sender/noop_sender.dart';
+export 'src/sender/in_memory_sender.dart';
 
 // Sampling
 export 'src/sampling/sampling_strategy.dart';
