@@ -287,7 +287,8 @@ abstract final class XRay {
   /// await capture.run(() => invokeAwsLambdaRuntime([
   ///   FunctionHandler(name: 'h', action: (ctx, event) =>
   ///     XRay.runLambdaInvocation(capture, ctx.functionName,
-  ///       () => handle(ctx, event))),
+  ///       // `() async =>` coerces a FutureOr-returning action to a Future.
+  ///       () async => handle(ctx, event))),
   /// ]));
   /// ```
   static Future<T> runLambdaInvocation<T>(

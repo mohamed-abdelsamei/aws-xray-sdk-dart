@@ -73,23 +73,26 @@ lib/
     sender/
       sender.dart            # Sender abstract class (send, close, sendPackets)
       udp_sender.dart        # UdpSender — fire-and-forget UDP, resolve/bind once, onError hook
-      noop_sender.dart       # NoopSender — discards all (tests / local dev)
+      noop_sender.dart       # NoopSender — discards all (local dev)
+      in_memory_sender.dart  # InMemorySender — records segments + packets for test assertions
       segment_encoder.dart   # encode(), encodeSubsegmentDoc() — 64 KB split logic
     http/
       xray_http_client.dart  # XRayHttpClient — wraps dart:io HttpClient
-      xray_http_overrides.dart # global dart:io patch
+      xray_http_overrides.dart # XRayHttpOverrides — global dart:io patch
       xray_base_client.dart  # XRayBaseClient — wraps package:http BaseClient
       xray_server_middleware.dart # handleTraced() — dart:io HttpServer request tracing
     wrappers/
       xray_interceptor.dart  # XRayInterceptor<Req,Res>, adapter records
       client_registry.dart   # internal descriptor registry, XRayWrapFn
       resource_extractor.dart# ResourceExtractor — DDB/S3/KMS/SQS/SNS
+    lambda/
+      lambda_trace_capture.dart # LambdaTraceCapture — captures Lambda-Runtime-Trace-Id per invocation
     aws/
       region.dart            # AWS endpoint region parsing
       throttle_codes.dart    # AWS throttling error-code detection
     trace_header.dart        # X-Amzn-Trace-Id formatter
 test/                        # mirrors lib/src/ structure
-example/                     # pub.dev examples (10 files + README.md)
+example/                     # pub.dev examples (11 files + README.md)
 scripts/
   run-daemon.sh              # start X-Ray daemon via Docker with SSO creds
 .github/
@@ -173,7 +176,7 @@ document per child subsegment.
 |---|---|
 | **UDP-first** | Fire-and-forget; no ACK, no retry. PutTraceSegments HTTP API delivery is not shipped until SigV4 signing is implemented. |
 | **Immutable models** | `Segment` / `Subsegment` are value objects; every mutation returns a copy. No shared-state races. |
-| **Sampling at entry** | `shouldSample()` called once at `run()` entry; result stored in Zone and read by `closeSegment()` and both interceptors. Prevents orphaned child traces. |
+| **Sampling at entry** | `shouldSample()` called once at `run()` entry; result stored in Zone and read by `closeSegment()` and every tracing path (HTTP clients, server middleware, Smithy interceptor) for header injection. Prevents orphaned child traces. |
 | **Tracing never faults the app** | Sender / serialization failures during finalization are swallowed in `run` / `runLambda` / `closeSegment` / `close`. `UdpSender.onError` surfaces local failures without throwing. |
 | **No `dart:mirrors`** | AOT-safe; compiles with `dart compile exe`. No `build_runner` step. Uses `dart:io`, so not Flutter-web compatible. |
 | **`abstract class Sender`** | Not `abstract interface class`: a concrete `sendPackets()` default lives here so sub-classes don't break. |
@@ -223,27 +226,33 @@ final ddb = XRay.fromClient(DynamoDbClient(...), tracer: tracer);
 
 ## AWS Lambda + `aws_lambda_dart_runtime_ns`
 
-The recommended production integration:
+The recommended production integration uses `LambdaTraceCapture`:
 
 ```dart
 // main.dart
-await invokeWithXRay(() => invokeAwsLambdaRuntime([
-  xRayHandler(name: 'fn.handler', tracer: tracer, action: handleEvent),
+final capture = LambdaTraceCapture();
+
+void main() => capture.run(() => invokeAwsLambdaRuntime([
+  xRayHandler(handleEvent), // your handler reads capture.context() -> runLambda
 ]));
 ```
 
-`invokeWithXRay` wraps the runtime's `package:http` calls via
+`LambdaTraceCapture.run()` overrides the runtime's `package:http` client via
 `http.runWithClient()` to capture `Lambda-Runtime-Trace-Id` per invocation.
-`xRayHandler` reads that captured header and calls `tracer.runLambda()`.
+Inside the handler, `capture.context()` returns the parsed `LambdaTraceContext`
+(`traceId`, `parentId`, `sampled`), which you forward to `tracer.runLambda()`.
+See the README "Lambda integration" section for the full handler wiring.
 
-See `demos/lambda_dart_runtime/` for a fully deployable CDK example.
+A fully deployable CDK example lives at `demos/lambda_dart_runtime/` in the
+parent workspace (one level up from this package, not tracked in the SDK repo).
 
 ---
 
 ## CI / release
 
 - **CI** (`ci.yml`): runs on every push/PR to `main`. Matrix: Dart stable + beta.
-  Steps: format check, `dart analyze --fatal-warnings`, `dart test`, publish dry-run.
+  `dart analyze --fatal-warnings` and `dart test` run on both; the format check
+  and `dart pub publish --dry-run` run on stable only.
 - **Commit lint** (`commitlint.yml`): validates PR titles as Conventional Commits.
 - **Publish** (`publish.yml`): triggers on a `v*.*.*` tag. Jobs run in order
   `test` (stable + beta) -> `github-release` (verify tag matches `pubspec.yaml`,
@@ -272,3 +281,26 @@ git push origin vX.Y.Z
 - `pubspec.lock` is gitignored (library, not an app).
 - One runtime dependency: `http` (for `XRayBaseClient`); otherwise only `dart:io` / `dart:convert` / `dart:async`.
 - Releases are tagged manually on a commit that already contains `publish.yml`; CI never creates tags.
+
+---
+
+## Testing
+
+`test/` mirrors `lib/src/` (26 test files). Common patterns when adding tests:
+
+- **Assert on emitted output with `InMemorySender`.** Build the tracer with one,
+  exercise the code, then inspect `sender.segments` (closed `Segment`s, the
+  `run()` path) and `sender.packets` (raw UDP payloads, the `runLambda()` path).
+  Prefer it over hand-rolled fake senders.
+- **Restore global state in `tearDown`.** `XRay.configure` / `XRay.tracer` mutate
+  the process-wide default and `XRay.patchHttp` installs global `HttpOverrides`.
+  Tests that touch either must reset: `tearDown(XRay.reset)` and/or
+  `tearDown(XRay.unpatchHttp)`, or they leak into the next test.
+- **Decode a Lambda packet** by stripping the `{"format":"json","version":1}\n`
+  header line and `jsonDecode`-ing the rest (see `tracer_lambda_test.dart`).
+- **Deterministic timing.** `ReservoirSampler` takes an injectable `elapsedMicros`
+  clock; pass a fake instead of sleeping. `nowSeconds()` (`utils.dart`) still reads
+  the wall clock directly — timing-sensitive segment tests assert ordering, not
+  absolute values.
+- **No live sockets.** Use `NoopSender` / `InMemorySender`; never bind a real
+  `UdpSender` in unit tests.

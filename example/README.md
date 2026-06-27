@@ -11,9 +11,19 @@ dart pub get
 dart run example/basic_usage.dart
 ```
 
-All examples use `NoopSender` by default — they print to stdout and exit
-without needing a daemon.  Swap `NoopSender()` for `UdpSender()` to send
-real traces to a local daemon:
+Every example runs to completion without a daemon and prints to stdout. They
+differ only in sender:
+
+- **`NoopSender`** (`advanced_tracing`, `error_handling`, `manual_instrumentation`,
+  `sampling_strategies`, `zero_config`, `lambda_runtime`) — discards segments.
+- **`UdpSender`** (`basic_usage`, `http_tracing`, `package_http_tracing`,
+  `server_middleware`) — fires to `127.0.0.1:2000`. With no daemon listening the
+  datagram is silently dropped, so the program still exits cleanly; start the
+  daemon below to actually see the traces.
+- **`InMemorySender`** (`aws_sdk_tracing`) — captures segments so the example can
+  print the subsegments it produced.
+
+Start a local daemon to receive the `UdpSender` traces:
 
 ```bash
 # Run the X-Ray daemon locally (Docker)
@@ -63,19 +73,37 @@ request.
 dart run example/http_tracing.dart
 ```
 
+### 2b. [package_http_tracing.dart](package_http_tracing.dart)
+
+Tracing `package:http` clients by wrapping them with `XRayBaseClient` — the
+counterpart to the `dart:io` patch above.  Use this when a library or AWS SDK
+(`aws_client` / `aws_*_api`) takes an `http.Client`: hand it a wrapped client
+and every request gets a subsegment with the trace header injected.
+
+```bash
+dart run example/package_http_tracing.dart
+```
+
 ### 3. [aws_sdk_tracing.dart](aws_sdk_tracing.dart)
 
 Wrapping a Smithy-generated AWS SDK client with `XRay.registerClient` /
 `XRay.fromClient`.  Uses a stub `DynamoDbClient` so it runs without a real
-Smithy dependency; replace the stub with the real client in your app.
+Smithy dependency; replace the stub with the real client in your app.  Traces a
+successful and a failing call, then prints the captured subsegments (via
+`InMemorySender`) so you can see exactly what gets sent to the daemon.
 
 Key points:
 
 - `requestAdapter` — extracts operation name, method, URL, and a
-  `withTraceHeader` callback from the raw request object
-- `responseAdapter` — extracts `statusCode` and optional `contentLength`
+  `withTraceHeader` callback that injects `X-Amzn-Trace-Id` into the request
+- `responseAdapter` — maps `statusCode`, `requestId` (→ `aws.request_id`),
+  `region`, and `errorCode` onto the subsegment
+- `extractor` — pulls the AWS resource (here the table) out of the request body
+  into `aws.*` fields (only needed for custom/stub types; built-in extractors
+  cover the real clients)
 - `rebuild` — extracts the client's internal send function, wraps it, and
   returns a new client instance via `copyWith`
+- a thrown service error is recorded as `fault=true` with its `cause`
 
 If you use a community HTTP-based AWS client (e.g. `aws_dynamodb_api` from
 pub.dev), skip `registerClient` entirely — `XRay.patchHttp()` already traces
@@ -172,9 +200,10 @@ Resulting trace structure:
 AWS::Lambda (facade)                    [auto]
   AWS::Lambda::Function                 [auto — id from Parent= in header]
     Overhead                            [auto]
-    <function-name>                     ← runLambda() subsegment ✓
-      parse-input                       ← manual subsegment
+    my-function                         ← runLambda() subsegment ✓
+      validate-input                    ← manual subsegment, namespace=aws
       jsonplaceholder.typicode.com      ← auto-traced HTTP, namespace=remote
+      DynamoDB                          ← XRayBaseClient, namespace=aws (PutItem)
 ```
 
 ```bash
@@ -201,9 +230,11 @@ XRay.configure(); // parses the daemon address (IPv6-safe) + function name
 ### Annotations vs metadata
 
 ```dart
-// Annotations — indexed, searchable in the X-Ray console filter bar
+// Annotations — indexed, searchable in the X-Ray console filter bar.
+// Keys allow only [A-Za-z0-9_]; any other char is sanitized to '_'
+// ('http.status' would become 'http_status'), so use '_' directly.
 segment.annotate('user_id', 'u-12345');
-segment.annotate('http.status', 200);
+segment.annotate('http_status', 200);
 
 // Metadata — arbitrary JSON, visible in the console but not searchable
 subsegment.addMetadata('orderId', 'order-abc-123');

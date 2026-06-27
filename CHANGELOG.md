@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.0
+
+Stable release of the 0.3.0 line. Functionally identical to `0.3.0-beta.2` —
+no API or behavior changes since the beta — with documentation and example
+polish. For the full set of changes since `0.2.1`, see the `0.3.0-beta.1` and
+`0.3.0-beta.2` sections below. Headline additions across the line:
+
+- **Zero-config setup.** `XRay.configure()` builds a tracer from the AWS
+  environment, installs a process-wide default (`XRay.tracer`), and patches HTTP
+  in one idempotent call; `XRay.reset()` returns to the unconfigured no-op state.
+- **`package:http` tracing.** `XRay.aws()` / `XRay.httpClientFor()` wrap an
+  `http.Client` for `aws_client` / `aws_*_api` SDKs, resolving the global tracer
+  per request.
+- **Lambda ergonomics.** `LambdaTraceCapture` captures the
+  `Lambda-Runtime-Trace-Id` header per invocation and `XRay.runLambdaInvocation`
+  collapses the parent-decision branch into one call.
+- **`InMemorySender`** for asserting on emitted segments and Lambda packets in
+  tests, plus `XRayTracer.onSampledDrop` / `onSendError` diagnostics.
+
+### Changed
+
+- Examples and docs updated: the AWS SDK client example now prints the
+  subsegments it produces (via `InMemorySender`), and the README/AGENT docs were
+  corrected to match the shipped API surface.
+
 ## 0.3.0-beta.2
 
 Second beta of the 0.3.0 line. This release tightens the beta.1 APIs and fixes
