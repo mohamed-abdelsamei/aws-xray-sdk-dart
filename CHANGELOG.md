@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1
+
+### Added
+
+- `package:http` AWS tracing now recognizes the Lambda data-plane `Invoke` call.
+  `XRayBaseClient` reads the operation (`Invoke`) and target function from the
+  REST path (`/2015-03-31/functions/{name}/invocations`), recording it as
+  `aws.function_name` and adding the function to `aws.resource_names` so the
+  invoked Lambda appears as its own node in the X-Ray service map.
+- `AwsData.functionName`, serialized as `function_name` in the `aws` block per
+  the X-Ray segment schema.
+
 ## 0.3.0
 
 Stable release of the 0.3.0 line. Functionally identical to `0.3.0-beta.2` —
