@@ -301,7 +301,69 @@ void main() {
       // A top-level segment has no parent_id (not a Lambda subsegment doc).
       expect(seg.containsKey('parent_id'), isFalse);
     });
+
+    test('with a captured header emits a subsegment doc parented to Lambda',
+        () async {
+      // The production path: the runtime poll captures Lambda-Runtime-Trace-Id,
+      // then runLambdaInvocation parents the handler span under Lambda's
+      // auto-created AWS::Lambda::Function segment via runLambda().
+      final sender = InMemorySender();
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'svc',
+          sender: sender,
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      final traceId = TraceId.generate();
+      const parentId = '53995c3f42cd8ad8';
+      final header = 'Root=$traceId;Parent=$parentId;Sampled=1';
+      final capture =
+          LambdaTraceCapture(innerFactory: () => _FakeRuntimeClient(header));
+
+      final result = await capture.run(() async {
+        // Runtime polls /invocation/next -> header is captured.
+        await http.get(Uri.parse('http://localhost/invocation/next'));
+        // Handler glue dispatches the invocation through the wrapper.
+        return XRay.runLambdaInvocation(capture, 'my-fn', () async => 7);
+      });
+
+      expect(result, 7);
+      // runLambda delivers an independent subsegment document via sendPackets;
+      // the top-level send() path (sender.segments) is never used, so it cannot
+      // compete with Lambda's auto-created AWS::Lambda::Function segment.
+      expect(sender.segments, isEmpty);
+      final doc = _decodePacket(sender.packets.single);
+      expect(doc['type'], 'subsegment');
+      expect(doc['name'], 'my-fn');
+      expect(doc['trace_id'], traceId.toString());
+      expect(doc['parent_id'], parentId);
+    });
   });
+}
+
+// Strips the X-Ray header line from a UDP payload and decodes the JSON body.
+Map<String, Object?> _decodePacket(List<int> packet) {
+  final raw = utf8.decode(packet);
+  return jsonDecode(raw.substring(raw.indexOf('\n') + 1))
+      as Map<String, Object?>;
+}
+
+// A fake runtime client that returns [_header] as Lambda-Runtime-Trace-Id,
+// mimicking the Runtime API /invocation/next response.
+class _FakeRuntimeClient extends http.BaseClient {
+  _FakeRuntimeClient(this._header);
+  final String _header;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async =>
+      http.StreamedResponse(
+        Stream.value(utf8.encode('{}')),
+        200,
+        headers: {'lambda-runtime-trace-id': _header},
+      );
 }
 
 class _MockClient extends http.BaseClient {

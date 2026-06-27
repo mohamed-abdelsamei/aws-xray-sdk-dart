@@ -22,6 +22,21 @@ via UDP — with first-class support for AWS Lambda custom runtimes.
 
 ---
 
+## See it in action
+
+One AWS Lambda request, traced two ways. Out of the box it's a single opaque
+span: you see the total latency but nothing about where it went. Add
+`aws_xray_sdk` and the same request fans out into a timed subsegment for every
+downstream call — outbound HTTP, DynamoDB, KMS, Secrets Manager, a nested Lambda
+invoke — so a slow dependency is obvious at a glance in the X-Ray service map.
+
+![Before and after instrumenting a Dart Lambda with aws_xray_sdk: an untraced run shows one opaque span, while the instrumented run breaks the same request into per-call subsegments](doc/images/trace-comparison.png)
+
+*Top: uninstrumented — one opaque span. Bottom: the same request with
+`aws_xray_sdk`, each downstream call broken out as its own timed subsegment.*
+
+---
+
 ## Features
 
 | | |
@@ -410,32 +425,47 @@ global `package:http` client for a zone (the runtime polls `/invocation/next`
 through it) and parses the `Lambda-Runtime-Trace-Id` header into a
 `LambdaTraceContext`. You supply only the runtime-specific handler glue, which
 depends on the [`aws_lambda_dart_runtime_ns`](https://pub.dev/packages/aws_lambda_dart_runtime_ns)
-types:
+types.
+
+`XRay.runLambdaInvocation(capture, functionName, fn)` collapses the whole
+`capture.context()` → `parentId` check → `runLambda`/`run` branch into one call,
+so each handler reduces to a thin adapter. It uses the process-wide tracer
+installed by `XRay.configure()`, so no `tracer` needs to be threaded through:
 
 ```dart
-final tracer = XRayTracer(serviceName: 'my-function');
 final capture = LambdaTraceCapture();
 
 FunctionHandler xRayHandler(FunctionAction action) => FunctionHandler(
       name: 'xray',
-      action: (ctx, event) {
-        final tc = capture.context(); // parsed from the captured header
-        if (tc.parentId != null) {
-          return tracer.runLambda(
-            tc.traceId, tc.parentId!, ctx.functionName,
-            () => action(ctx, event),
-            sampled: tc.sampled,
-          );
-        }
-        // No header captured — start a fresh top-level segment.
-        final segment = Segment.begin(name: ctx.functionName, traceId: tc.traceId);
-        return tracer.run(segment, () => action(ctx, event));
-      },
+      // `() async =>` coerces FunctionAction's FutureOr return to the Future
+      // that runLambdaInvocation expects.
+      action: (ctx, event) => XRay.runLambdaInvocation(
+        capture, ctx.functionName, () async => action(ctx, event)),
     );
 
-void main() => capture.run(() => invokeAwsLambdaRuntime([
-      xRayHandler(handleEvent),
-    ]));
+void main() {
+  XRay.configure(sampling: FixedRateSampler(1.0));
+  capture.run(() => invokeAwsLambdaRuntime([
+        xRayHandler(handleEvent),
+      ]));
+}
+```
+
+Under the hood, `runLambdaInvocation` is exactly this branch — reach for it
+directly only if you need to customize the dispatch:
+
+```dart
+final tc = capture.context(); // parsed from the captured header
+if (tc.parentId != null) {
+  return tracer.runLambda(
+    tc.traceId, tc.parentId!, ctx.functionName,
+    () async => action(ctx, event),
+    sampled: tc.sampled,
+  );
+}
+// No header captured — start a fresh top-level segment.
+final segment = Segment.begin(name: ctx.functionName, traceId: tc.traceId);
+return tracer.run(segment, () async => action(ctx, event));
 ```
 
 ### Complete Lambda example
@@ -460,10 +490,11 @@ await tracer.run(segment, fn, httpMethod: 'POST', urlPath: '/checkout');
 
 ```dart
 // Fixed rate — sample N% of all requests
-XRayTracer(sampling: FixedRateSampler(0.05))  // 5 %
+XRayTracer(serviceName: 'svc', sampling: FixedRateSampler(0.05))  // 5 %
 
 // Reservoir — keep up to N traces/second, then fall back to fixed rate
-XRayTracer(sampling: ReservoirSampler(reservoirSize: 50, fixedRate: 0.05))
+XRayTracer(serviceName: 'svc',
+    sampling: ReservoirSampler(reservoirSize: 50, fixedRate: 0.05))
 
 // Custom strategy — sample based on request properties
 class MyRuleSampler implements SamplingStrategy {
@@ -508,18 +539,25 @@ authoritative, and `GetSamplingRules` / `GetSamplingTargets` are not consulted
 | Sender | Description |
 |---|---|
 | `UdpSender` (default) | Fire-and-forget UDP to the X-Ray daemon (`127.0.0.1:2000`) |
-| `NoopSender` | Discards all segments; useful for tests and local dev |
+| `NoopSender` | Discards all segments; useful for local dev |
+| `InMemorySender` | Records emitted segments and packets so tests can assert on them |
 
 > **Note:** The package currently sends traces through the X-Ray daemon protocol
 > (`UdpSender`). The PutTraceSegments HTTP API path is not shipped because SigV4
 > signing is not implemented.
 
 ```dart
-// Tests — discard all segments
-XRayTracer(sender: NoopSender());
+// Tests — capture segments and assert on them
+final sender = InMemorySender();
+final tracer = XRayTracer(serviceName: 'svc', sender: sender);
+// ... exercise code, then: expect(sender.segments, hasLength(1));
+
+// Local dev — discard all segments
+XRayTracer(serviceName: 'svc', sender: NoopSender());
 
 // Custom daemon host (e.g. container-based setup)
-XRayTracer(sender: UdpSender(host: 'xray-daemon.local', port: 2000));
+XRayTracer(serviceName: 'svc',
+    sender: UdpSender(host: 'xray-daemon.local', port: 2000));
 ```
 
 `UdpSender` never throws into your traced code — a resolution, bind, or send
@@ -528,6 +566,7 @@ callback (silent by default):
 
 ```dart
 XRayTracer(
+  serviceName: 'svc',
   sender: UdpSender(onError: (e) => log.warning('X-Ray send failed', e)),
 );
 ```
@@ -602,11 +641,14 @@ XRayTracer.run / runLambda        Zone stores: Segment, TraceState (entity
        ├──── annotate / addMetadata         (mutate the current scope)
        ├──── beginSubsegment / endSubsegment / failSubsegment  (manual, flat)
        │
-       ├──── XRayHttpClient        (auto via XRay.patchHttp)
+       ├──── XRayHttpClient        (auto via XRay.patchHttp — dart:io)
        │         └─ openUrl → beginSubsegment, inject X-Amzn-Trace-Id
        │         └─ close  → endSubsegment with status
        │
-       └──── XRayInterceptor       (auto via XRay.fromClient<T>)
+       ├──── XRayBaseClient        (package:http — XRay.aws / httpClientFor)
+       │         └─ send → beginSubsegment, inject header, endSubsegment
+       │
+       └──── XRayInterceptor       (auto via XRay.fromClient<T> — Smithy)
                  └─ wrap send fn → beginSubsegment, await, endSubsegment
        │
        ▼
@@ -650,7 +692,8 @@ lib/
     sender/
       sender.dart                # Sender abstract class  (send, close, sendPackets)
       udp_sender.dart            # UdpSender     — fire-and-forget UDP
-      noop_sender.dart           # NoopSender    — discard (tests / dev)
+      noop_sender.dart           # NoopSender    — discard (local dev)
+      in_memory_sender.dart      # InMemorySender — capture segments/packets for tests
       segment_encoder.dart       # encode(), encodeSubsegmentDoc()
     http/
       xray_http_client.dart      # XRayHttpClient  — wraps dart:io HttpClient
@@ -661,6 +704,8 @@ lib/
       xray_interceptor.dart      # XRayInterceptor<Req,Res>, adapter records
       client_registry.dart       # internal descriptor registry
       resource_extractor.dart    # ResourceExtractor — DDB/S3/KMS/SQS/SNS
+    lambda/
+      lambda_trace_capture.dart  # LambdaTraceCapture — captures Lambda-Runtime-Trace-Id
     aws/
       region.dart                # AWS endpoint region parsing
       throttle_codes.dart        # AWS throttling error-code detection
@@ -731,15 +776,24 @@ docker run --rm \
 # Basic traced operation
 dart run example/basic_usage.dart
 
+# Zero-config setup (XRay.configure / global tracer)
+dart run example/zero_config.dart
+
 # Automatic dart:io HTTP tracing
 dart run example/http_tracing.dart
 
 # package:http tracing via XRayBaseClient
 dart run example/package_http_tracing.dart
 
+# AWS SDK client wrapping (prints the captured subsegments)
+dart run example/aws_sdk_tracing.dart
+
 # Server-side tracing with handleTraced
 dart run example/server_middleware.dart
 ```
+
+The full set of runnable examples lives in [`example/`](example/) — see its
+[README](example/README.md) for the complete index.
 
 ### 3. View traces
 
