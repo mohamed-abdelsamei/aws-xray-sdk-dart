@@ -227,11 +227,13 @@ final class XRayBaseClient extends http.BaseClient {
     final queueUrl = body['QueueUrl'] as String?;
     final topicArn = body['TopicArn'] as String?;
     final keyId = body['KeyId'] as String?;
+    // Lambda Invoke carries the target function in the URL path, not the body.
+    final functionName = _lambdaFunctionName(request.url);
 
     // resource_names: the named resources this call targets, so each appears as
     // its own node in the X-Ray service map (matches the Node.js SDK).
     final resourceNames = [
-      for (final r in [tableName, bucketName, queueUrl, topicArn])
+      for (final r in [tableName, bucketName, queueUrl, topicArn, functionName])
         if (r != null) r,
     ];
 
@@ -244,6 +246,7 @@ final class XRayBaseClient extends http.BaseClient {
       keyId: keyId,
       queueUrl: queueUrl,
       topicArn: topicArn,
+      functionName: functionName,
       resourceNames: resourceNames.isEmpty ? null : resourceNames,
     );
   }
@@ -259,6 +262,8 @@ final class XRayBaseClient extends http.BaseClient {
   ///    `DynamoDB_20120810.GetItem` → `GetItem`.
   ///  * Query protocols (SNS, SQS, …) carry it as the `Action` form field, e.g.
   ///    `Action=Publish` → `Publish`.
+  ///  * REST-JSON protocols (Lambda, …) carry it in the URL path, e.g.
+  ///    `POST /2015-03-31/functions/{name}/invocations` → `Invoke`.
   static String? _operationName(http.BaseRequest request) {
     final target =
         request.headers['X-Amz-Target'] ?? request.headers['x-amz-target'];
@@ -268,6 +273,33 @@ final class XRayBaseClient extends http.BaseClient {
     if (request is http.Request) {
       final action = Uri.splitQueryString(request.body)['Action'];
       if (action != null && action.isNotEmpty) return action;
+    }
+    return _restOperation(request.url);
+  }
+
+  /// Operation name for REST-protocol AWS endpoints whose action lives in the
+  /// URL path rather than a header or body field. Currently covers the Lambda
+  /// data-plane `Invoke` call; returns null for unrecognised paths.
+  static String? _restOperation(Uri url) {
+    if (url.host.split('.').first.toLowerCase() != 'lambda') return null;
+    final segments = url.pathSegments;
+    if (segments.length >= 3 &&
+        segments[segments.length - 3] == 'functions' &&
+        segments.last == 'invocations') {
+      return 'Invoke';
+    }
+    return null;
+  }
+
+  /// The Lambda function name from an `Invoke` path
+  /// (`/2015-03-31/functions/{name}/invocations`), or null.
+  static String? _lambdaFunctionName(Uri url) {
+    if (url.host.split('.').first.toLowerCase() != 'lambda') return null;
+    final segments = url.pathSegments;
+    if (segments.length >= 3 &&
+        segments[segments.length - 3] == 'functions' &&
+        segments.last == 'invocations') {
+      return segments[segments.length - 2];
     }
     return null;
   }

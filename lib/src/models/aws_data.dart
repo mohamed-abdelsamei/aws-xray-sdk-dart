@@ -9,6 +9,7 @@ final class AwsData {
     this.keyId,
     this.queueUrl,
     this.topicArn,
+    this.functionName,
     this.resourceNames,
   });
 
@@ -22,6 +23,7 @@ final class AwsData {
   final String? keyId; // KMS
   final String? queueUrl; // SQS
   final String? topicArn; // SNS
+  final String? functionName; // Lambda
   final List<String>? resourceNames;
 
   Map<String, Object?> toJson() => {
@@ -33,6 +35,7 @@ final class AwsData {
         if (keyId != null) 'key_id': keyId,
         if (queueUrl != null) 'queue_url': queueUrl,
         if (topicArn != null) 'topic_arn': topicArn,
+        if (functionName != null) 'function_name': functionName,
         if (resourceNames != null) 'resource_names': resourceNames,
       };
 }

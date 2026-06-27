@@ -86,6 +86,36 @@ void main() {
       expect(aws['table_name'], 'users');
     });
 
+    test('Lambda Invoke gets operation + function_name from the URL path',
+        () async {
+      // Lambda's data-plane Invoke is REST-JSON: the operation and target
+      // function live in the path, not in X-Amz-Target or an Action field.
+      final inner = _MockClient(200, responseHeaders: {
+        'x-amzn-requestid': 'req-lambda-1',
+      });
+      final client = XRayBaseClient(inner, tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        final req = http.Request(
+          'POST',
+          Uri.parse('https://lambda.us-east-1.amazonaws.com'
+              '/2015-03-31/functions/my-worker/invocations'),
+        )..body = jsonEncode({'userId': '2'});
+        await client.send(req);
+      });
+
+      final sub = sender.lastSubs.single as Map;
+      expect(sub['name'], 'Lambda');
+      expect(sub['namespace'], 'aws');
+      final aws = sub['aws'] as Map;
+      expect(aws['operation'], 'Invoke');
+      expect(aws['function_name'], 'my-worker');
+      expect(aws['region'], 'us-east-1');
+      expect(aws['request_id'], 'req-lambda-1');
+      expect(aws['resource_names'] as List, ['my-worker']);
+    });
+
     test('injects X-Amzn-Trace-Id header', () async {
       String? capturedHeader;
       final inner = _MockClient(200, onRequest: (req) {
