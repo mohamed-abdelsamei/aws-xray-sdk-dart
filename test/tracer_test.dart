@@ -376,6 +376,60 @@ void main() {
     });
   });
 
+  group('XRayTracer — trace() one-liner', () {
+    test('creates, names, and sends a segment; returns the fn value', () async {
+      final result = await tracer.trace('checkout', () => 42);
+
+      expect(result, 42);
+      expect(sender.sent, hasLength(1));
+      expect(sender.last['name'], 'checkout');
+      expect(sender.last['trace_id'], matches(r'^1-[0-9a-f]{8}-[0-9a-f]{24}$'));
+    });
+
+    test('continues an upstream trace from an X-Amzn-Trace-Id header',
+        () async {
+      final upstream = TraceId.generate();
+      final header = 'Root=$upstream;Parent=53995c3f42cd8ad8;Sampled=1';
+
+      await tracer.trace('downstream', () async {}, traceHeader: header);
+
+      expect(sender.last['trace_id'], upstream.toString());
+      expect(sender.last['parent_id'], '53995c3f42cd8ad8');
+    });
+
+    test('an unparseable header starts a fresh trace', () async {
+      await tracer.trace('op', () async {}, traceHeader: 'not-a-header');
+
+      expect(sender.last['trace_id'], matches(r'^1-[0-9a-f]{8}-[0-9a-f]{24}$'));
+      expect(sender.last.containsKey('parent_id'), isFalse);
+    });
+
+    test('subsegments and captureAsync nest inside the traced block', () async {
+      await tracer.trace('order', () async {
+        await tracer.captureAsync('validate', (span) async {});
+        final sub = tracer.beginSubsegment('db');
+        tracer.endSubsegment(sub);
+      });
+
+      final names = sender.lastSubs.map((s) => (s as Map)['name']).toSet();
+      expect(names, {'validate', 'db'});
+    });
+
+    test('an uncaught error faults the segment and rethrows', () async {
+      await expectLater(
+        () => tracer.trace('bad', () => throw StateError('boom')),
+        throwsStateError,
+      );
+      expect(sender.last['fault'], isTrue);
+      expect(sender.last['cause'], isNotNull);
+    });
+
+    test('user is recorded on the segment', () async {
+      await tracer.trace('op', () async {}, user: 'u-1');
+      expect(sender.last['user'], 'u-1');
+    });
+  });
+
   group('XRayTracer — sampling', () {
     test('segments are not sent when sampling rate is 0', () async {
       final neverTracer = XRayTracer(

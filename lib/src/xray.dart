@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
@@ -61,6 +62,61 @@ abstract final class XRay {
   static void metadata(String key, Object value,
           {String namespace = 'default'}) =>
       defaultTracer.addMetadata(key, value, namespace: namespace);
+
+  /// Traces [fn] as a complete segment named [name] using the process-wide
+  /// [tracer] — the shortest integration path:
+  ///
+  /// ```dart
+  /// void main() async {
+  ///   XRay.configure();
+  ///   await XRay.trace('checkout', () async {
+  ///     // HTTP and AWS calls in here become subsegments automatically.
+  ///   });
+  /// }
+  /// ```
+  ///
+  /// A facade over [XRayTracer.trace]: pass the incoming `X-Amzn-Trace-Id`
+  /// header as [traceHeader] to continue an upstream distributed trace, and
+  /// [httpMethod]/[urlPath] to inform the sampling decision. Until [configure]
+  /// runs, the default tracer is a no-op, so this is always safe to call.
+  static Future<T> trace<T>(
+    String name,
+    FutureOr<T> Function() fn, {
+    String? traceHeader,
+    String httpMethod = 'UNKNOWN',
+    String urlPath = '/',
+    String? user,
+  }) =>
+      defaultTracer.trace(
+        name,
+        fn,
+        traceHeader: traceHeader,
+        httpMethod: httpMethod,
+        urlPath: urlPath,
+        user: user,
+      );
+
+  /// Wraps [body] as a nested subsegment named [name] on the process-wide
+  /// [tracer] — a facade over [XRayTracer.captureAsync].
+  ///
+  /// Anything traced inside [body] (manual subsegments, auto-instrumented
+  /// HTTP/AWS calls, nested [capture] blocks) becomes its child. An uncaught
+  /// error marks the subsegment faulted and rethrows. Off-trace it follows the
+  /// tracer's `ContextMissingPolicy` and runs [body] untraced.
+  ///
+  /// ```dart
+  /// await XRay.trace('order', () async {
+  ///   await XRay.capture('validate', (span) async {
+  ///     span.annotate('orderId', id);
+  ///   });
+  /// });
+  /// ```
+  static Future<T> capture<T>(
+    String name,
+    Future<T> Function(TraceContext span) body, {
+    String namespace = 'local',
+  }) =>
+      defaultTracer.captureAsync(name, body, namespace: namespace);
 
   /// One-call setup: builds a tracer, installs it as the process-wide default
   /// ([tracer]), and patches `dart:io` HTTP ([patchHttp]).
@@ -274,8 +330,11 @@ abstract final class XRay {
   /// When the captured context carries a parent id, the work is parented under
   /// Lambda's auto-created `AWS::Lambda::Function` segment via
   /// [XRayTracer.runLambda]; otherwise (no header captured — e.g. local
-  /// testing) a fresh top-level segment is started via [XRayTracer.run]. Uses
-  /// the process-wide [tracer], so [configure] should run first.
+  /// testing) a fresh top-level segment is started via [XRayTracer.run].
+  ///
+  /// Uses the process-wide [XRay.tracer] by default, so [configure] should run
+  /// first; pass [tracer] to pin a specific instance instead (e.g. in tests).
+  /// [fn] may return a value or a `Future` — handler actions drop in directly.
   ///
   /// The runtime-specific handler glue (extracting [functionName] and the event)
   /// stays with the caller; this collapses the open/close/parent-decision into
@@ -287,22 +346,24 @@ abstract final class XRay {
   /// await capture.run(() => invokeAwsLambdaRuntime([
   ///   FunctionHandler(name: 'h', action: (ctx, event) =>
   ///     XRay.runLambdaInvocation(capture, ctx.functionName,
-  ///       // `() async =>` coerces a FutureOr-returning action to a Future.
-  ///       () async => handle(ctx, event))),
+  ///       () => handle(ctx, event))),
   /// ]));
   /// ```
   static Future<T> runLambdaInvocation<T>(
     LambdaTraceCapture capture,
     String functionName,
-    Future<T> Function() fn,
-  ) {
+    FutureOr<T> Function() fn, {
+    XRayTracer? tracer,
+  }) {
+    final t = tracer ?? XRay.tracer;
+    Future<T> run() async => await fn();
     final tc = capture.context();
     if (tc.parentId != null) {
-      return tracer.runLambda(
+      return t.runLambda(
         tc.traceId,
         tc.parentId!,
         functionName,
-        fn,
+        run,
         sampled: tc.sampled,
       );
     }
@@ -311,7 +372,7 @@ abstract final class XRay {
       traceId: tc.traceId,
       origin: 'AWS::Lambda::Function',
     );
-    return tracer.run(segment, fn);
+    return t.run(segment, run);
   }
 
   /// Creates an [HttpClient] that is **not** traced by [patchHttp].

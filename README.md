@@ -63,45 +63,58 @@ dart pub add aws_xray_sdk
 
 ## Quick start
 
+Two lines: configure once, then trace any unit of work.
+
 ```dart
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 
-final tracer = XRayTracer(serviceName: 'order-service');
+void main() async {
+  XRay.configure(); // reads env, installs the global tracer, patches HTTP
 
-Future<void> processOrder(String orderId) {
-  final segment = Segment.begin(
-    name: 'order-service',
-    traceId: TraceId.generate(),
-  );
+  await XRay.trace('process-order', () async {
+    // Every HttpClient / AWS call in here becomes a subsegment automatically.
+    final result = await fetchInventory('order-1');
 
-  return tracer.run(segment, () async {
-    // All HttpClient calls inside this closure are traced automatically.
-    final result = await fetchInventory(orderId);
+    // Nested span with indexed annotations:
+    await XRay.capture('validate', (span) async {
+      span.annotate('orderId', 'order-1');
+    });
     return result;
   });
 }
 ```
 
-### Zero-config setup
-
 `XRay.configure()` builds a tracer from the standard AWS environment
 (`AWS_XRAY_DAEMON_ADDRESS`, `AWS_LAMBDA_FUNCTION_NAME`), installs it as the
-process-wide default (`XRay.tracer`), and patches `dart:io` HTTP — in one call.
-It is **idempotent**, so it's safe to call from multiple entry points.
+process-wide default (`XRay.tracer`), and patches `dart:io` HTTP — in one
+idempotent call. Until it runs, `XRay.tracer` is a no-op that discards
+everything, so instrumentation is always safe to call. Override any piece
+(`XRay.configure(serviceName: 'svc', sampling: ReservoirSampler())`) and use
+`XRay.reset()` to return to the unconfigured state, e.g. in tests.
+
+**Continuing a distributed trace:** pass the incoming `X-Amzn-Trace-Id` header
+and this service links into the caller's trace:
 
 ```dart
-void main() {
-  XRay.configure(); // reads env, installs the global tracer, patches HTTP
-
-  // Anywhere else, with no tracer threading:
-  final ddb = DynamoDB(region: 'us-east-1', client: XRay.aws());
-  // XRay.tracer is the configured tracer; until configure() runs it is a
-  // no-op that discards everything, so instrumentation is safe either way.
-}
+await XRay.trace('handle-request', handler,
+    traceHeader: request.headers.value('x-amzn-trace-id'),
+    httpMethod: 'POST', urlPath: '/checkout');
 ```
 
-Override any piece: `XRay.configure(serviceName: 'svc', sampling: ReservoirSampler())`.
-Use `XRay.reset()` to return to the unconfigured (no-op) state, e.g. in tests.
+### Explicit tracer
+
+Prefer no global state? Construct and hold the tracer yourself — `trace()` is
+the same one-call API, and `run()` remains for pre-built segments:
+
+```dart
+final tracer = XRayTracer(serviceName: 'order-service');
+
+Future<void> processOrder(String orderId) =>
+    tracer.trace('process-order', () async {
+      final result = await fetchInventory(orderId);
+      return result;
+    });
+```
 
 ---
 
@@ -437,10 +450,8 @@ final capture = LambdaTraceCapture();
 
 FunctionHandler xRayHandler(FunctionAction action) => FunctionHandler(
       name: 'xray',
-      // `() async =>` coerces FunctionAction's FutureOr return to the Future
-      // that runLambdaInvocation expects.
       action: (ctx, event) => XRay.runLambdaInvocation(
-        capture, ctx.functionName, () async => action(ctx, event)),
+        capture, ctx.functionName, () => action(ctx, event)),
     );
 
 void main() {
@@ -672,15 +683,17 @@ library code — can call `tracer.currentSegment` to get the active segment.
 lib/
   aws_xray_sdk.dart              # public barrel export
   src/
-    tracer.dart                  # XRayTracer — run(), runLambda(), captureAsync(), annotate(), subsegment API
-    xray.dart                    # XRay facade — patchHttp(), fromClient<T>(), registerClient<T>(), untracedHttpClient()
-    trace_scope.dart             # TraceScope / TraceContext — live runtime entity tree (mutable, serialized at close)
-    trace_suppression.dart       # runWithoutDartIoTracing() — avoids double-tracing under patchHttp
+    tracer.dart                  # XRayTracer — trace(), run(), runLambda(), captureAsync(), annotate(), subsegment API
+    xray.dart                    # XRay facade — trace(), capture(), patchHttp(), fromClient<T>(), untracedHttpClient()
     utils.dart                   # randomHex(), nowSeconds()
+    context/
+      trace_scope.dart           # TraceScope / TraceContext — live runtime entity tree (mutable, serialized at close)
+      trace_suppression.dart     # runWithoutDartIoTracing() — avoids double-tracing under patchHttp
     models/
       segment.dart               # Segment       (immutable value object)
       subsegment.dart            # Subsegment    (immutable value object)
       trace_id.dart              # TraceId       — generate, parse, header fields
+      trace_header.dart          # X-Amzn-Trace-Id formatter
       http_data.dart             # HttpData, HttpRequestData, HttpResponseData
       aws_data.dart              # AwsData       — operation, tableName, …
       cause.dart                 # Cause + XRayException
@@ -707,9 +720,8 @@ lib/
     lambda/
       lambda_trace_capture.dart  # LambdaTraceCapture — captures Lambda-Runtime-Trace-Id
     aws/
-      region.dart                # AWS endpoint region parsing
+      region.dart                # AWS endpoint host/region parsing (isAwsHost, regionFromAwsHost)
       throttle_codes.dart        # AWS throttling error-code detection
-    trace_header.dart            # X-Amzn-Trace-Id formatter
 ```
 
 ---

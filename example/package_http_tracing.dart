@@ -25,14 +25,8 @@ Future<void> main() async {
   // All requests through this client open subsegments automatically.
   final client = XRayBaseClient(http.Client(), tracer);
 
-  final segment = Segment.begin(
-    name: 'package-http-demo',
-    traceId: TraceId.generate(),
-    namespace: 'local',
-  );
-
-  await tracer.run(segment, () async {
-    print('Trace: ${segment.traceId}');
+  await tracer.trace('package-http-demo', () async {
+    print('Trace: ${tracer.currentTraceId}');
 
     // Each send() call opens a subsegment named by the host,
     // injects X-Amzn-Trace-Id, and records the response.

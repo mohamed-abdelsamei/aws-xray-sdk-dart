@@ -3,7 +3,7 @@ import 'dart:io';
 import '../models/http_data.dart';
 import '../models/segment.dart';
 import '../models/trace_id.dart';
-import '../trace_header.dart';
+import '../models/trace_header.dart';
 import '../tracer.dart';
 
 /// Extracts X-Ray trace context from an incoming HTTP request's
@@ -67,7 +67,10 @@ Future<T> handleTraced<T>(
         tracer.recordSegmentHttp(HttpData(
           request: HttpRequestData(
             method: method,
-            url: request.uri.toString(),
+            // requestedUri reconstructs the full URL (scheme://host/path) —
+            // the X-Ray schema's http.request.url field expects a full URL,
+            // and request.uri is only the path + query.
+            url: request.requestedUri.toString(),
             traced: true,
           ),
           response: threw

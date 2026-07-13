@@ -15,8 +15,9 @@ import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 
 Future<void> main() async {
   // One-call setup. In production this is just `XRay.configure();`.
+  // (When an explicit tracer is passed, configure() installs it as-is —
+  // serviceName/sampling arguments only apply when it builds the tracer.)
   XRay.configure(
-    serviceName: 'zero-config-demo',
     tracer: XRayTracer(
       serviceName: 'zero-config-demo',
       sender: NoopSender(), // swap for UdpSender() in production
@@ -27,24 +28,27 @@ Future<void> main() async {
 
   print('configured: ${XRay.isConfigured}'); // true
 
-  // Anywhere in the app — no tracer threading. XRay.tracer is the global one.
-  final tracer = XRay.tracer;
-
   // Hand XRay.aws() to any aws_client / aws_*_api constructor's `client:`
   // argument and every call is traced (bound to the global tracer):
   //
   //   final ddb = DynamoDB(region: 'us-east-1', client: XRay.aws());
 
-  await tracer.run(tracer.beginSegment(), () async {
+  // Anywhere in the app — no tracer threading. XRay.trace() runs a complete
+  // segment on the global tracer; XRay.capture() nests a span inside it.
+  await XRay.trace('zero-config-op', () async {
     // Bulk annotation in one call instead of N annotate() calls.
-    tracer.annotateAll({
+    XRay.annotate({
       'environment': 'demo',
       'feature': 'zero-config',
       'version': 3,
     });
 
-    print('trace: ${tracer.currentTraceId}');
-    await Future<void>.delayed(const Duration(milliseconds: 50));
+    await XRay.capture('inner-step', (span) async {
+      span.addMetadata('detail', {'step': 1}, namespace: 'demo');
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+    });
+
+    print('trace: ${XRay.tracer.currentTraceId}');
   });
 
   // Return to the unconfigured (no-op) state — handy in tests.

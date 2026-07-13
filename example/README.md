@@ -36,8 +36,8 @@ docker run --rm -p 2000:2000/udp amazon/aws-xray-daemon -o
 
 ### 1. [basic_usage.dart](basic_usage.dart)
 
-The minimal end-to-end path: create a tracer, create a segment, run a traced
-block, confirm the segment is closed.
+The minimal end-to-end path: create a tracer, then `tracer.trace(name, fn)` —
+one call that begins the segment, runs the block, closes, and sends.
 
 ```bash
 dart run example/basic_usage.dart
@@ -47,8 +47,9 @@ dart run example/basic_usage.dart
 
 The fastest setup: `XRay.configure()` reads the AWS environment, installs the
 process-wide default tracer (`XRay.tracer`), and patches HTTP in one idempotent
-call.  Also shows `XRay.aws()` for `aws_client` / `aws_*_api` clients,
-`tracer.annotateAll()`, and `XRay.reset()`.
+call — then `XRay.trace()` / `XRay.capture()` / `XRay.annotate()` trace work
+anywhere with no tracer threading.  Also shows `XRay.aws()` for
+`aws_client` / `aws_*_api` clients and `XRay.reset()`.
 
 ```bash
 dart run example/zero_config.dart
@@ -115,14 +116,15 @@ dart run example/aws_sdk_tracing.dart
 
 ### 4. [advanced_tracing.dart](advanced_tracing.dart)
 
-Manual subsegments for fine-grained tracing.  Shows the
-`beginSubsegment` / `endSubsegment` / `failSubsegment` lifecycle across
-several units of work (validate → inventory → payment → persist).
+Structuring a trace: nested `captureAsync` blocks vs. the manual
+`beginSubsegment` / `endSubsegment` / `failSubsegment` lifecycle.
 
-**Subsegment model**: all subsegments opened inside `tracer.run()` are
-collected in the active Zone and appear as a flat list under `subsegments` in
-the final segment document.  The SDK does not automatically nest them; nesting
-in the X-Ray timeline is driven by `start_time` / `end_time` overlap.
+**Subsegment model**: `captureAsync(name, fn)` forks a child scope, so
+everything traced inside it — manual spans and auto-instrumented HTTP/AWS
+calls — nests under it in the trace tree, and an uncaught error marks it
+faulted automatically.  Manual subsegments attach under whatever scope is
+active when they open: flat siblings at the top level, children inside a
+`captureAsync` block.
 
 ```bash
 dart run example/advanced_tracing.dart
@@ -131,7 +133,7 @@ dart run example/advanced_tracing.dart
 ### 5. [sampling_strategies.dart](sampling_strategies.dart)
 
 Comparing `FixedRateSampler` and `ReservoirSampler`.  Shows how the sampling
-decision is made once at `tracer.run()` entry and propagated to all child
+decision is made once at `tracer.trace()` / `run()` entry and propagated to all child
 subsegments via the Zone.
 
 ```bash
@@ -166,7 +168,7 @@ dart run example/server_middleware.dart
 
 ### 8. [manual_instrumentation.dart](manual_instrumentation.dart)
 
-Manual instrumentation for non-AWS code: annotations, metadata, nested
+Manual instrumentation for non-AWS code: annotations, metadata, manual
 subsegments, and custom sampling — without any AWS SDK client involved.
 Useful when wrapping a database driver or internal library.
 

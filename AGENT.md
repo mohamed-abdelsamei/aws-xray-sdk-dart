@@ -53,15 +53,17 @@ dart pub publish --dry-run
 lib/
   aws_xray_sdk.dart          # barrel export — public API surface
   src/
-    tracer.dart              # XRayTracer — Zone context, run(), runLambda(), captureAsync(), annotate(), subsegment API
-    xray.dart                # XRay facade — patchHttp(), fromClient<T>(), registerClient(), untracedHttpClient()
-    trace_scope.dart         # TraceScope / TraceContext — live mutable entity tree, serialized at close
-    trace_suppression.dart   # runWithoutDartIoTracing() — prevents double-tracing under patchHttp
+    tracer.dart              # XRayTracer — Zone context, trace(), run(), runLambda(), captureAsync(), annotate(), subsegment API
+    xray.dart                # XRay facade — trace(), capture(), patchHttp(), fromClient<T>(), untracedHttpClient()
     utils.dart               # randomHex(), nowSeconds()
+    context/
+      trace_scope.dart       # TraceScope / TraceContext — live mutable entity tree, serialized at close
+      trace_suppression.dart # runWithoutDartIoTracing() — prevents double-tracing under patchHttp
     models/
       segment.dart           # Segment (immutable value object)
       subsegment.dart        # Subsegment (immutable value object)
       trace_id.dart          # TraceId — generate, tryParse, parseParentId, parseSampled
+      trace_header.dart      # X-Amzn-Trace-Id formatter
       cause.dart             # Cause + XRayException
       http_data.dart         # HttpData, HttpRequestData, HttpResponseData
       aws_data.dart          # AwsData — operation, tableName, bucketName, …
@@ -88,9 +90,8 @@ lib/
     lambda/
       lambda_trace_capture.dart # LambdaTraceCapture — captures Lambda-Runtime-Trace-Id per invocation
     aws/
-      region.dart            # AWS endpoint region parsing
+      region.dart            # AWS endpoint host/region parsing (isAwsHost, regionFromAwsHost)
       throttle_codes.dart    # AWS throttling error-code detection
-    trace_header.dart        # X-Amzn-Trace-Id formatter
 test/                        # mirrors lib/src/ structure
 example/                     # pub.dev examples (11 files + README.md)
 scripts/
@@ -99,6 +100,7 @@ scripts/
   workflows/
     ci.yml                   # push/PR to main: format + analyze + test (stable + beta)
     commitlint.yml           # PR: Conventional Commit title check
+    release.yml              # main: auto-tag vX.Y.Z on pubspec version bump (needs RELEASE_PAT)
     publish.yml              # tag v*.*.*: test -> GitHub Release -> pub publish (OIDC)
 ```
 
@@ -254,6 +256,10 @@ parent workspace (one level up from this package, not tracked in the SDK repo).
   `dart analyze --fatal-warnings` and `dart test` run on both; the format check
   and `dart pub publish --dry-run` run on stable only.
 - **Commit lint** (`commitlint.yml`): validates PR titles as Conventional Commits.
+- **Auto-release** (`release.yml`): triggers on a push to `main` that changes
+  `version:` in `pubspec.yaml`. Verifies a matching `## X.Y.Z` CHANGELOG
+  section exists, then pushes the `vX.Y.Z` tag using the `RELEASE_PAT` repo
+  secret. Idempotent — skips when the version is unchanged or the tag exists.
 - **Publish** (`publish.yml`): triggers on a `v*.*.*` tag. Jobs run in order
   `test` (stable + beta) -> `github-release` (verify tag matches `pubspec.yaml`,
   create the Release from the matching `CHANGELOG.md` section) -> `publish`
@@ -261,10 +267,17 @@ parent workspace (one level up from this package, not tracked in the SDK repo).
   via OIDC, no stored token). Requires pub.dev automated publishing enabled
   for the repo with tag pattern `v{{version}}`.
 
-Releases are tagged manually, never by CI (a tag pushed with `GITHUB_TOKEN`
-cannot trigger a workflow, so there is no auto-tag bot). To release: bump
-`pubspec.yaml`, add a matching `## X.Y.Z` section to `CHANGELOG.md`, merge to
-`main`, then tag a commit that already contains `publish.yml`:
+**To release:** bump `pubspec.yaml`, add a matching `## X.Y.Z` section to
+`CHANGELOG.md`, and merge to `main` — `release.yml` tags automatically and
+`publish.yml` takes it from the tag.
+
+Two constraints shape this pipeline: a tag pushed with the default
+`GITHUB_TOKEN` cannot trigger `publish.yml` (GitHub blocks recursive workflow
+runs), and pub.dev's OIDC exchange only accepts runs triggered by a matching
+tag ref — so `release.yml` must tag with a PAT and cannot publish directly.
+One-time setup: create a fine-grained PAT with **Contents: Read and write** on
+this repo and save it as the `RELEASE_PAT` secret. Manual tagging remains a
+valid fallback (e.g. if the secret is unset):
 ```bash
 git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin vX.Y.Z

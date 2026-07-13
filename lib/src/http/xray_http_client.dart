@@ -3,10 +3,10 @@ import 'dart:convert' show Encoding;
 import 'dart:io';
 import '../models/http_data.dart';
 import '../models/subsegment.dart';
-import '../trace_header.dart';
-import '../trace_suppression.dart';
+import '../models/trace_header.dart';
+import '../context/trace_suppression.dart';
 import '../tracer.dart';
-import '../utils.dart' show isAwsHost;
+import '../aws/region.dart' show isAwsHost;
 
 /// Wraps a `dart:io` [HttpClient] to trace every outbound HTTP request.
 ///

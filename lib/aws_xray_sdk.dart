@@ -4,20 +4,22 @@
 /// ```dart
 /// import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 ///
-/// final tracer = XRayTracer(serviceName: 'my-service');
+/// void main() async {
+///   // One-call setup: env-derived tracer, global default, dart:io HTTP patch.
+///   XRay.configure();
 ///
-/// // Instrument a Smithy AWS SDK client once at startup.
-/// final ddb = XRay.fromClient(DynamoDbClient(...), tracer: tracer);
-///
-/// // Optionally trace all dart:io HTTP calls.
-/// XRay.patchHttp(tracer);
-///
-/// // Run a traced operation.
-/// final segment = Segment.begin(name: 'my-service', traceId: TraceId.generate());
-/// await tracer.run(segment, () async {
-///   final result = await ddb.getItem(...);
-/// });
+///   await XRay.trace('process-order', () async {
+///     // HTTP and AWS calls in here become subsegments automatically.
+///     await XRay.capture('validate', (span) async {
+///       span.annotate('orderId', 'o-1');
+///     });
+///   });
+/// }
 /// ```
+///
+/// Prefer explicit wiring? Construct an [XRayTracer] yourself and use
+/// `tracer.trace(...)` / `tracer.run(...)`; see the README for the full tour
+/// (HTTP tracing, AWS SDK client wrapping, Lambda, sampling).
 library;
 
 // Core

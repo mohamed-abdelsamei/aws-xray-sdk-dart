@@ -1,10 +1,14 @@
 name: Publish to pub.dev
 
-# Publishes to pub.dev when a release tag (v1.2.3) is pushed.
+# Publishes to pub.dev when a release tag (v1.2.3) is pushed — either
+# automatically by release.yml (on a version bump merged to main) or manually
+# per AGENT.md.
 #
-# release.yml owns version computation and tagging (Phase 1) plus the test
-# matrix and GitHub Release. This workflow owns the pub.dev publish step,
-# using Dart's official reusable workflow (OIDC — no stored token).
+# This workflow owns the full release pipeline from the tag onward: test
+# matrix -> tag/pubspec verification -> GitHub Release (from the CHANGELOG
+# section) -> pub.dev publish via Dart's official reusable workflow (OIDC —
+# no stored token). pub.dev only accepts runs triggered by a matching tag,
+# which is why release.yml tags with a PAT instead of publishing directly.
 #
 # pub.dev automated publishing must be enabled for this to succeed:
 #   https://pub.dev/packages/aws_xray_sdk/admin

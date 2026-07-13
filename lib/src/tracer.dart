@@ -10,9 +10,9 @@ import 'sender/noop_sender.dart';
 import 'sender/segment_encoder.dart';
 import 'sender/sender.dart';
 import 'sender/udp_sender.dart';
-import 'trace_scope.dart';
+import 'context/trace_scope.dart';
 
-export 'trace_scope.dart' show TraceContext;
+export 'context/trace_scope.dart' show TraceContext;
 
 // Zone key for the active segment.
 final _zoneKey = #_xraySegment;
@@ -153,6 +153,50 @@ final class XRayTracer {
       onComplete: (root) async {
         await closeSegment(root.applyToSegment(segment));
       },
+    );
+  }
+
+  /// Traces [fn] as a complete segment named [name] — the one-call entry
+  /// point. Creates the segment, runs [fn] inside the trace zone, then closes
+  /// and (if sampled) sends it.
+  ///
+  /// Equivalent to `run(Segment.begin(...), fn)` without the segment
+  /// bookkeeping. [fn] may return a value or a `Future`.
+  ///
+  /// To **continue an upstream distributed trace**, pass the incoming
+  /// `X-Amzn-Trace-Id` header as [traceHeader]: its `Root=` becomes this
+  /// segment's trace id and its `Parent=` the parent id, linking this service
+  /// into the caller's trace. The local sampling strategy remains authoritative
+  /// (matching `handleTraced`); an unparseable or absent header starts a fresh
+  /// trace. [httpMethod] and [urlPath] feed the sampling decision, and [user]
+  /// is recorded on the segment.
+  ///
+  /// ```dart
+  /// final result = await tracer.trace('checkout', () async {
+  ///   // HTTP/AWS calls in here are traced as subsegments.
+  ///   return submitOrder();
+  /// });
+  /// ```
+  Future<T> trace<T>(
+    String name,
+    FutureOr<T> Function() fn, {
+    String? traceHeader,
+    String httpMethod = 'UNKNOWN',
+    String urlPath = '/',
+    String? user,
+  }) {
+    final upstream = traceHeader == null ? null : TraceId.tryParse(traceHeader);
+    final segment = Segment.begin(
+      name: name,
+      traceId: upstream ?? TraceId.generate(),
+      parentId: upstream == null ? null : TraceId.parseParentId(traceHeader!),
+      user: user,
+    );
+    return run(
+      segment,
+      () async => await fn(),
+      httpMethod: httpMethod,
+      urlPath: urlPath,
     );
   }
 
