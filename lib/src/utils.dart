@@ -14,19 +14,3 @@ String randomHex(int length) {
 
 /// Returns the current time as seconds since the Unix epoch (floating-point).
 double nowSeconds() => DateTime.now().millisecondsSinceEpoch / 1000.0;
-
-const awsDomainSuffixes = [
-  '.amazonaws.com.cn',
-  '.c2s.ic.gov',
-  '.sc2s.sgov.gov',
-  '.amazonaws.com',
-];
-
-/// Returns true for AWS endpoint hosts across known AWS partitions.
-bool isAwsHost(String host) {
-  final lower = host.toLowerCase();
-  for (final suffix in awsDomainSuffixes) {
-    if (lower.endsWith(suffix)) return true;
-  }
-  return false;
-}

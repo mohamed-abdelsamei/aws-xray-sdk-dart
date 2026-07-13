@@ -341,6 +341,87 @@ void main() {
       expect(doc['trace_id'], traceId.toString());
       expect(doc['parent_id'], parentId);
     });
+
+    test('accepts a synchronous (non-Future) fn', () async {
+      // Handler actions typed FutureOr<T> drop in without `() async =>`
+      // coercion; a plain value return must work.
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'svc',
+          sender: InMemorySender(),
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      final result =
+          await XRay.runLambdaInvocation(LambdaTraceCapture(), 'fn', () => 41);
+      expect(result, 41);
+    });
+
+    test('a pinned tracer is used instead of the global', () async {
+      final pinned = InMemorySender();
+      final pinnedTracer = XRayTracer(
+        serviceName: 'pinned',
+        sender: pinned,
+        sampling: FixedRateSampler(1.0),
+      );
+      // Install a DIFFERENT global tracer; the pinned one must win.
+      final global = InMemorySender();
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'global',
+          sender: global,
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      await XRay.runLambdaInvocation(
+        LambdaTraceCapture(),
+        'fn',
+        () async => 1,
+        tracer: pinnedTracer,
+      );
+
+      expect(pinned.segments, hasLength(1),
+          reason: 'the pinned tracer must receive the segment');
+      expect(global.segments, isEmpty);
+    });
+  });
+
+  group('XRay.trace / XRay.capture facade', () {
+    test('trace + capture run on the configured global tracer', () async {
+      final sender = InMemorySender();
+      XRay.configure(
+        tracer: XRayTracer(
+          serviceName: 'svc',
+          sender: sender,
+          sampling: FixedRateSampler(1.0),
+        ),
+        patchDartIoHttp: false,
+      );
+
+      final result = await XRay.trace('order', () async {
+        await XRay.capture('validate', (span) async {
+          span.annotate('orderId', 'o-1');
+        });
+        return 'ok';
+      });
+
+      expect(result, 'ok');
+      final segment = sender.segments.single;
+      expect(segment.name, 'order');
+      final sub = segment.subsegments.single;
+      expect(sub.name, 'validate');
+      expect(sub.annotations?['orderId'], 'o-1');
+    });
+
+    test('trace is safe before configure(): runs fn, emits nothing', () async {
+      expect(XRay.isConfigured, isFalse);
+      final result = await XRay.trace('op', () => 7);
+      expect(result, 7); // no-op tracer: fn still runs, nothing is sent
+    });
   });
 }
 

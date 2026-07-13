@@ -186,13 +186,8 @@ void main() async {
   // opens a subsegment with operationName='GetItem', namespace='aws'.
   final ddb = XRay.fromClient(rawClient, tracer: tracer);
 
-  final segment = Segment.begin(
-    name: 'ddb-demo',
-    traceId: TraceId.generate(),
-  );
-
-  await tracer.run(segment, () async {
-    print('Trace: ${segment.traceId}\n');
+  await tracer.trace('ddb-demo', () async {
+    print('Trace: ${tracer.currentTraceId}\n');
 
     // 1. A successful call — recorded as a clean subsegment.
     final response = await ddb.getItem(

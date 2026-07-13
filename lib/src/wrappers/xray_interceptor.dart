@@ -3,8 +3,8 @@ import '../models/cause.dart';
 import '../models/http_data.dart';
 import '../aws/region.dart';
 import '../aws/throttle_codes.dart';
-import '../trace_header.dart';
-import '../trace_suppression.dart';
+import '../models/trace_header.dart';
+import '../context/trace_suppression.dart';
 import '../tracer.dart';
 import 'resource_extractor.dart';
 

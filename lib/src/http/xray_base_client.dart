@@ -8,10 +8,9 @@ import '../aws/throttle_codes.dart';
 import '../models/aws_data.dart';
 import '../models/cause.dart';
 import '../models/http_data.dart';
-import '../trace_header.dart';
-import '../trace_suppression.dart';
+import '../models/trace_header.dart';
+import '../context/trace_suppression.dart';
 import '../tracer.dart';
-import '../utils.dart' show isAwsHost;
 
 /// Wraps [http.Client] to trace every outbound HTTP request through
 /// `package:http`.

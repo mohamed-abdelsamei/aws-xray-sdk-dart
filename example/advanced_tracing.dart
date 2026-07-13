@@ -1,16 +1,16 @@
-// Example: manual subsegments for fine-grained tracing.
+// Example: structuring a trace — nested captureAsync vs. manual subsegments.
 //
-// Shows how to bracket discrete units of work — database calls, external API
-// calls, file processing — with beginSubsegment / endSubsegment / failSubsegment.
+// Two complementary APIs:
 //
-// Important: all subsegments opened inside tracer.run() end up as siblings in
-// the final segment document (flat list under 'subsegments').  The SDK does not
-// currently support true parent→child nesting within a single Zone; all spans
-// share the same parent segment.
+//   * captureAsync(name, fn) — wraps a block as a subsegment and NESTS anything
+//     traced inside it (manual subsegments and auto-instrumented HTTP/AWS calls
+//     become its children). An uncaught error marks it faulted and rethrows.
+//     Prefer this: it replaces the begin/end/fail bookkeeping below.
 //
-// To create a truly nested span, open a manual subsegment, do the work, then
-// close it.  Multiple nested-looking spans will appear in chronological order
-// in the X-Ray timeline view.
+//   * beginSubsegment / endSubsegment / failSubsegment — the manual API for
+//     flat sibling spans, or when begin and end straddle a callback boundary.
+//     Manual spans attach under whatever scope is active when they open, so
+//     inside captureAsync they nest under it; at the top level they are flat.
 
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 
@@ -21,70 +21,56 @@ void main() async {
     sampling: FixedRateSampler(1.0),
   );
 
-  final segment = Segment.begin(
-    name: 'process-order',
-    traceId: TraceId.generate(),
-  ).annotate('user_id', 'u-12345');
+  await tracer.trace('process-order', () async {
+    print('Trace: ${tracer.currentTraceId}');
+    tracer.annotate('user_id', 'u-12345'); // indexed on the segment
 
-  await tracer.run(segment, () async {
-    print('Trace: ${segment.traceId}');
+    // ── captureAsync: a nested phase of work ──────────────────────────────
+    // Everything traced inside the block becomes a child of 'checkout' in the
+    // X-Ray timeline. Fault handling is automatic: an uncaught error marks
+    // 'checkout' faulted and rethrows.
+    await tracer.captureAsync('checkout', (span) async {
+      span
+        ..annotate('order_id', 'order-abc-123') // indexed, filterable
+        ..addMetadata('items', 3); // non-indexed detail
 
-    // ── 1. Validate input ─────────────────────────────────────────────────
-    final validationSub = tracer.beginSubsegment('validate-order');
-    try {
-      await Future.delayed(const Duration(milliseconds: 10));
-      tracer.endSubsegment(
-        validationSub
-            .addMetadata('orderId', 'order-abc-123')
-            .addMetadata('amountCents', 4999),
-      );
-      print('  validation OK');
-    } catch (e) {
-      tracer.failSubsegment(validationSub, e);
-      rethrow;
-    }
-
-    // ── 2. Check inventory (simulated AWS call) ───────────────────────────
-    // namespace='aws' marks this as an AWS service call in the service map.
-    final inventorySub =
-        tracer.beginSubsegment('inventory-check', namespace: 'aws');
-    try {
+      // A manual span opened here nests under 'checkout'.
+      final inventory =
+          tracer.beginSubsegment('inventory-check', namespace: 'aws');
       await Future.delayed(const Duration(milliseconds: 30));
-      tracer.endSubsegment(inventorySub);
-      print('  inventory OK');
-    } catch (e) {
-      tracer.failSubsegment(inventorySub, e);
-      rethrow;
-    }
+      tracer.endSubsegment(inventory);
+      print('  checkout/inventory OK');
 
-    // ── 3. Charge payment gateway (remote call) ───────────────────────────
-    // namespace='remote' marks this as an external HTTP call.
-    final paymentSub =
-        tracer.beginSubsegment('charge-payment', namespace: 'remote');
-    try {
-      await Future.delayed(const Duration(milliseconds: 80));
-      tracer.endSubsegment(paymentSub);
-      print('  payment OK');
-    } catch (e) {
-      // failSubsegment records the exception type and message in 'cause',
-      // and sets fault=true on the subsegment.
-      tracer.failSubsegment(paymentSub, e);
-      rethrow;
-    }
+      await tracer.captureAsync('charge-payment', (pay) async {
+        pay.annotate('gateway', 'stripe');
+        await Future.delayed(const Duration(milliseconds: 80));
+        print('  checkout/charge-payment OK');
+      });
+    });
 
-    // ── 4. Persist order (local / database) ───────────────────────────────
-    final dbSub = tracer.beginSubsegment('persist-order', namespace: 'local');
+    // ── Manual API: a flat sibling span with explicit error handling ──────
+    // Use this shape when the work can throw and you need the span to record
+    // the failure but the code to continue (no rethrow), or when begin/end
+    // don't share a scope.
+    final persist = tracer.beginSubsegment('persist-order', namespace: 'local');
     try {
       await Future.delayed(const Duration(milliseconds: 25));
-      tracer.endSubsegment(dbSub);
+      tracer.endSubsegment(persist.addMetadata('table', 'orders'));
       print('  persist OK');
     } catch (e) {
-      tracer.failSubsegment(dbSub, e);
+      // Records the exception in 'cause' and sets fault=true.
+      tracer.failSubsegment(persist, e);
       rethrow;
     }
 
     print('Order processed successfully');
   });
 
-  print('Segment closed — 4 subsegments sent to X-Ray daemon');
+  // Resulting structure:
+  //   process-order
+  //     ├─ checkout
+  //     │    ├─ inventory-check   (manual, nested under captureAsync)
+  //     │    └─ charge-payment    (nested captureAsync)
+  //     └─ persist-order          (manual, flat sibling)
+  print('Segment closed and sent');
 }

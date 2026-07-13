@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.0
+
+One-call tracing ergonomics: configure once, then trace any unit of work in a
+single line — plus distributed-trace continuation and Lambda handler
+polish. All changes are backward-compatible.
+
+### Added
+
+- **`XRayTracer.trace(name, fn)`** — the one-call entry point: creates the
+  segment, runs `fn` inside the trace zone, closes, and sends. Accepts
+  `FutureOr` so any function drops in, `user:` for the segment's user field,
+  and `httpMethod:`/`urlPath:` for the sampling decision.
+- **Distributed-trace continuation.** `trace(..., traceHeader:)` takes the
+  incoming `X-Amzn-Trace-Id` header and links this service into the caller's
+  trace (`Root=` becomes the trace id, `Parent=` the parent id); the local
+  sampling strategy stays authoritative, matching `handleTraced`.
+- **`XRay.trace(...)` and `XRay.capture(...)`** — static facades over the
+  process-wide tracer, so after `XRay.configure()` the full trace lifecycle
+  (root span, nested spans, annotations, metadata) needs no tracer threading.
+  Both are safe no-ops before `configure()` runs.
+
+### Changed
+
+- `XRay.runLambdaInvocation` now accepts a `FutureOr`-returning `fn` (handler
+  actions drop in without `() async =>` coercion) and an optional `tracer:`
+  parameter to pin an instance instead of the global — consistent with the
+  rest of the facade.
+- Internal layout reorganized: zone-context machinery moved to
+  `lib/src/context/`, the `X-Amzn-Trace-Id` formatter to `lib/src/models/`,
+  and AWS partition-suffix knowledge consolidated in `lib/src/aws/region.dart`
+  (`isAwsHost`). No public-API impact.
+- Examples modernized to the `trace()`/`capture()` API, with a rewritten
+  `advanced_tracing.dart` demonstrating `captureAsync` nesting and a stub-free
+  look at what each example emits.
+
+### Fixed
+
+- `handleTraced` now records the **full request URL** (`requestedUri`) in the
+  segment's `http.request.url` instead of only the path + query, per the X-Ray
+  segment schema.
+- The path-based custom-sampler demo in `example/sampling_strategies.dart`
+  actually exercises the sampler now (it never forwarded `urlPath` into the
+  sampling decision before) and prints each operation's sampled result.
+
 ## 0.3.1
 
 ### Added

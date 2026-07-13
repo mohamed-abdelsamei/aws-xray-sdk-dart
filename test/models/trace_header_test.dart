@@ -2,7 +2,7 @@ import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 import 'package:test/test.dart';
 
 // ignore: implementation_imports — buildTraceHeader is internal.
-import 'package:aws_xray_sdk/src/trace_header.dart';
+import 'package:aws_xray_sdk/src/models/trace_header.dart';
 
 void main() {
   group('buildTraceHeader', () {

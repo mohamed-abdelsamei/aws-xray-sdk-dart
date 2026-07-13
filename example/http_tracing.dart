@@ -30,13 +30,8 @@ void main() async {
   // XRayHttpClient inside itself and produces duplicate subsegments.
   XRay.patchHttp(tracer);
 
-  final segment = Segment.begin(
-    name: 'http-demo',
-    traceId: TraceId.generate(),
-  );
-
-  await tracer.run(segment, () async {
-    print('Trace: ${segment.traceId}');
+  await tracer.trace('http-demo', () async {
+    print('Trace: ${tracer.currentTraceId}');
 
     // ── Request 1: successful GET ─────────────────────────────────────────
     // XRayHttpClient intercepts getUrl, opens subsegment 'jsonplaceholder.typicode.com'

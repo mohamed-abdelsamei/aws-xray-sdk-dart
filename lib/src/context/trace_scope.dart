@@ -1,8 +1,8 @@
-import 'models/annotation.dart';
-import 'models/http_data.dart';
-import 'models/segment.dart';
-import 'models/subsegment.dart';
-import 'utils.dart';
+import '../models/annotation.dart';
+import '../models/http_data.dart';
+import '../models/segment.dart';
+import '../models/subsegment.dart';
+import '../utils.dart';
 
 /// A live handle to the entity (segment or subsegment) currently being traced.
 ///

@@ -1,6 +1,6 @@
 // Example: manual instrumentation for non-AWS code.
 //
-// Shows annotations, metadata, SQL subsegments, and custom sampling
+// Shows annotations, metadata, manual subsegments, and custom sampling
 // without any AWS SDK client involved.
 
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
@@ -24,14 +24,12 @@ Future<void> processPayment({
   required int amountCents,
   required String userId,
 }) async {
-  // Build the segment with known context before running.
-  final segment = _tracer
-      .beginSegment(user: userId)
-      .annotate('order_id', orderId)
-      .annotate('currency', 'USD');
-
-  await _tracer.run(segment, () async {
+  await _tracer.trace('process-payment', user: userId, () async {
     print('Processing payment for order $orderId');
+
+    // Indexed annotations on the active segment — searchable in the console.
+    _tracer.annotate('order_id', orderId);
+    _tracer.annotate('currency', 'USD');
 
     // 1. Validate payment — local subsegment.
     final validationSub = _tracer.beginSubsegment('validate-payment');

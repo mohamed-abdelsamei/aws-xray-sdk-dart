@@ -1,3 +1,15 @@
+// Example: comparing sampling strategies.
+//
+// The decision is made ONCE at trace()/run() entry and stored in the Zone, so
+// every downstream header injection carries the same Sampled=1/0 flag. An
+// unsampled trace still executes identically — the segment is just never sent.
+//
+//   FixedRateSampler(rate)  — independent coin flip per request.
+//   ReservoirSampler(n, r)  — first n requests each second always sampled,
+//                             then falls back to rate r. Per isolate.
+//   SamplingStrategy        — implement it to sample on request properties
+//                             (pass httpMethod/urlPath to trace()/run()).
+
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 
 void main() async {
@@ -42,18 +54,17 @@ void main() async {
     sampling: _PathBasedSampler(),
   );
   for (final path in ['/api/users', '/health', '/api/orders', '/metrics']) {
-    await _runOperation(customTracer, path);
+    await _runOperation(customTracer, path, urlPath: path);
   }
 }
 
-Future<void> _runOperation(XRayTracer tracer, String name) async {
-  final segment = Segment.begin(
-    name: name,
-    traceId: TraceId.generate(),
-  );
-  await tracer.run(segment, () async {
+Future<void> _runOperation(XRayTracer tracer, String name,
+    {String urlPath = '/'}) async {
+  // urlPath (and httpMethod) feed the SamplingRequest so strategies can match
+  // on request properties. isSampled reads this trace's decision in-zone.
+  await tracer.trace(name, urlPath: urlPath, () async {
     await Future.delayed(const Duration(milliseconds: 10));
-    print('  ran: $name');
+    print('  ran: $name  sampled=${tracer.isSampled}');
   });
 }
 

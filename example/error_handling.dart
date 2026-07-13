@@ -1,3 +1,13 @@
+// Example: how errors, faults, and throttles are recorded on segments.
+//
+//   4xx  → error = true          (withError)
+//   429  → throttle = true       (withThrottle; error is implied)
+//   5xx  → fault = true          (withFault)
+//   uncaught exception in run()  → fault = true + 'cause' with the exception
+//
+// Also shows that a failed subsegment (failSubsegment) records its own error
+// without failing the parent segment — later subsegments still run.
+
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 
 void main() async {
@@ -38,7 +48,8 @@ Future<void> _runOperation(
   int? httpStatus,
   Exception? exception,
 }) async {
-  // Build the segment with any known annotations before running.
+  // Pre-building the segment (to apply error flags before running) is the
+  // use case run() exists for; for the plain path prefer tracer.trace().
   var segment = Segment.begin(
     name: name,
     traceId: TraceId.generate(),
@@ -68,13 +79,8 @@ Future<void> _runOperation(
 }
 
 Future<void> _runNestedErrors(XRayTracer tracer) async {
-  final segment = Segment.begin(
-    name: 'parent-with-nested-errors',
-    traceId: TraceId.generate(),
-  );
-
   try {
-    await tracer.run(segment, () async {
+    await tracer.trace('parent-with-nested-errors', () async {
       print('Running parent operation');
 
       // Successful subsegment.

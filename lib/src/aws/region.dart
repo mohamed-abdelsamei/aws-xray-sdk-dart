@@ -1,3 +1,21 @@
+/// Endpoint host suffixes for the known AWS partitions: standard/GovCloud,
+/// China, and the US ISO/ISOB air-gapped partitions.
+const awsDomainSuffixes = [
+  '.amazonaws.com.cn', // China
+  '.c2s.ic.gov', // US ISO
+  '.sc2s.sgov.gov', // US ISOB
+  '.amazonaws.com', // standard + GovCloud
+];
+
+/// Returns true for AWS endpoint hosts across known AWS partitions.
+bool isAwsHost(String host) {
+  final lower = host.toLowerCase();
+  for (final suffix in awsDomainSuffixes) {
+    if (lower.endsWith(suffix)) return true;
+  }
+  return false;
+}
+
 /// Derives an AWS region from standard regional AWS endpoint hosts, across the
 /// standard, China, GovCloud, and ISO partitions, including FIPS and dualstack
 /// variants.
@@ -17,14 +35,8 @@ String? regionFromAwsHost(String host) {
   final lower = host.toLowerCase();
 
   // Strip the partition suffix so only the service/region labels remain.
-  const suffixes = [
-    '.amazonaws.com.cn', // China
-    '.c2s.ic.gov', // US ISO
-    '.sc2s.sgov.gov', // US ISOB
-    '.amazonaws.com', // standard + GovCloud
-  ];
   String? body;
-  for (final suffix in suffixes) {
+  for (final suffix in awsDomainSuffixes) {
     if (lower.endsWith(suffix)) {
       body = lower.substring(0, lower.length - suffix.length);
       break;
@@ -65,6 +77,8 @@ bool _isAllLetters(String s) {
   return true;
 }
 
+/// [regionFromAwsHost] for a full URL string: parses out the host and derives
+/// the region from it. Returns null for unparseable URLs or global endpoints.
 String? regionFromAwsUrl(String url) {
   final host = Uri.tryParse(url)?.host;
   if (host == null || host.isEmpty) return null;

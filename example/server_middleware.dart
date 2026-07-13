@@ -62,15 +62,11 @@ Future<void> _pingHandler(HttpRequest request) async {
 }
 
 Future<void> _workHandler(HttpRequest request) async {
-  // Manual subsegment for a discrete unit of work inside the request.
-  final sub = _tracer.beginSubsegment('compute', namespace: 'local');
-  try {
+  // Nested span for a discrete unit of work inside the request — errors fault
+  // the span and rethrow automatically.
+  await _tracer.captureAsync('compute', (_) async {
     await Future.delayed(const Duration(milliseconds: 50));
-    _tracer.endSubsegment(sub);
-  } catch (e) {
-    _tracer.failSubsegment(sub, e);
-    rethrow;
-  }
+  });
 
   request.response
     ..statusCode = HttpStatus.ok
