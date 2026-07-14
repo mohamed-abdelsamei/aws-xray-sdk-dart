@@ -11,6 +11,16 @@ maintainers and users integrating lower-level clients, especially when combining
   - one `TraceState` for the trace,
   - the current mutable `TraceScope`,
   - the sampling decision made at entry.
+- `XRayTracer.trace(name, fn)` is a front-end to `run()`: it builds the
+  segment, then delegates — so every contract below applies identically.
+  Additional contracts specific to `trace()`:
+  - `fn` may return `T` or `Future<T>` (`FutureOr`); the result is awaited.
+  - `traceHeader:` (an incoming `X-Amzn-Trace-Id` value) continues the
+    upstream trace: `Root=` becomes the segment's trace id, `Parent=` its
+    parent id. The **local** sampling strategy still decides (upstream
+    `Sampled=` is not an override — same rule as `handleTraced`).
+  - An absent or unparseable header starts a fresh trace with a generated id
+    and no parent — never an error.
 - Sampling is decided once at `run()` entry from the configured
   `SamplingStrategy`. Downstream header injection uses the same decision for the
   whole trace.
@@ -183,13 +193,17 @@ flowchart LR
 - subsegment namespace: `aws`,
 - subsegment name: canonical service name when known (`DynamoDB`, `SNS`, `SQS`,
   `S3`, `KMS`, `Lambda`, etc.), otherwise the endpoint prefix,
-- operation parsed from `X-Amz-Target` or query-protocol `Action`,
+- operation parsed from `X-Amz-Target`, query-protocol `Action`, or — for
+  REST-JSON endpoints carrying the action in the URL path — the Lambda
+  data-plane `Invoke` pattern (`/2015-03-31/functions/{name}/invocations`,
+  which also yields `function_name`),
 - resource fields parsed from request body where available:
   - `table_name`,
   - `bucket_name`,
   - `key_id`,
   - `queue_url`,
   - `topic_arn`,
+  - `function_name` (from the Lambda `Invoke` URL path),
   - `resource_names`,
 - `request_id` from `x-amzn-requestid` or `x-amz-request-id`,
 - `region` from standard regional hosts such as
@@ -330,6 +344,12 @@ for Lambda custom runtimes where the platform has already created the root
 Read trace context from the Lambda Runtime API's
 `Lambda-Runtime-Trace-Id` response header for each invocation. Do not rely on a
 stale process-level `_X_AMZN_TRACE_ID` environment variable.
+
+`XRay.runLambdaInvocation(capture, name, fn, {tracer})` packages the standard
+dispatch: it reads `capture.context()` and calls `runLambda` when a `Parent=`
+was captured, or starts a fresh top-level segment (origin
+`AWS::Lambda::Function`) otherwise. `fn` may return a value or a `Future`;
+`tracer:` pins an instance instead of the process-wide default.
 
 ```mermaid
 flowchart TD

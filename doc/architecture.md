@@ -20,9 +20,15 @@ For exact runtime contracts and edge-case behavior, see
 - `XRayTracer`
   - central trace context for one service instance.
   - manages active segment/subsegment state via Dart `Zone`.
-  - exposes `run`, `runLambda`, `beginSegment`, `closeSegment`, `beginSubsegment`, `endSubsegment`, and `failSubsegment`.
+  - `trace(name, fn)` is the one-call entry point: creates the segment, runs
+    `fn` (which may return a value or a `Future`) inside the trace zone, closes,
+    and sends. Accepts `user:`, `httpMethod:`/`urlPath:` (sampling inputs), and
+    `traceHeader:` — the incoming `X-Amzn-Trace-Id`, whose `Root=`/`Parent=`
+    continue the caller's distributed trace (the local sampler stays
+    authoritative; an unparseable header starts a fresh trace).
+  - also exposes `run` (for pre-built segments), `runLambda`, `beginSegment`, `closeSegment`, `beginSubsegment`, `endSubsegment`, and `failSubsegment`.
   - `captureAsync(name, fn)` runs a block as a **nested** subsegment, and `annotate` / `annotateAll` / `addMetadata` mutate the entity currently being traced.
-  - `currentSegment` / `currentTraceId` read the active trace context inside a `run` / `runLambda` zone (both `null` outside one); `recordSegmentHttp` attaches HTTP request/response data to the root segment.
+  - `currentSegment` / `currentTraceId` read the active trace context inside a `trace` / `run` / `runLambda` zone (both `null` outside one); `recordSegmentHttp` attaches HTTP request/response data to the root segment.
 
 - `TraceContext`
   - the live handle passed to a `captureAsync` block: `annotate`, `addMetadata`, `setError`, `setFault`.
@@ -32,10 +38,15 @@ For exact runtime contracts and edge-case behavior, see
   - facade for integration helpers.
   - `configure({fromEnv, serviceName, sampling, tracer, patchDartIoHttp})` — one-call, **idempotent** setup: parses `AWS_XRAY_DAEMON_ADDRESS` (IPv6-safe) and `AWS_LAMBDA_FUNCTION_NAME`, installs the process-wide default tracer, and patches HTTP. `reset()` returns to the unconfigured state.
   - `tracer` getter/setter — the process-wide default `XRayTracer`; a **no-op** that discards everything until configured, so instrumentation runs unconditionally. `isConfigured` reports whether a real tracer is installed.
+  - `trace(name, fn)` / `capture(name, body)` — static facades over the global
+    tracer's `trace` / `captureAsync`, so after `configure()` the full trace
+    lifecycle needs no tracer threading; `annotate(map)` / `metadata(key, value)`
+    add data to whatever is currently traced. All are safe no-ops before
+    `configure()` runs.
   - `patchHttp(tracer)` and `unpatchHttp()` for global `dart:io` HTTP patching.
   - `untracedHttpClient()` to build an unwrapped transport when tracing should be avoided.
   - `httpClientFor(tracer)` / `aws()` to wrap a `package:http` client (for `aws_client` / `aws_*_api`); `aws()` uses the global default tracer.
-  - `runLambdaInvocation(capture, name, fn)` — runs one Lambda invocation, parenting under the function facade when a header was captured or starting a fresh segment otherwise.
+  - `runLambdaInvocation(capture, name, fn, {tracer})` — runs one Lambda invocation, parenting under the function facade when a header was captured or starting a fresh segment otherwise. `fn` may return a value or a `Future`; pass `tracer:` to pin an instance instead of the global.
   - `registerClient` / `fromClient` for Smithy AWS SDK client wrapping.
 
 - `LambdaTraceCapture`
@@ -82,6 +93,12 @@ For exact runtime contracts and edge-case behavior, see
 - AWS requests receive `aws` namespace handling and resource naming for service map visibility.
 - AWS response metadata includes `aws.request_id`, derived `aws.region`, resource
   names, AWS error causes, and AWS throttle detection by error code.
+- The operation name is parsed from `X-Amz-Target` (JSON protocols) or the
+  `Action` form field (query protocols); for REST-JSON endpoints whose action
+  lives in the URL path, the Lambda data-plane `Invoke` call is recognized
+  (`/2015-03-31/functions/{name}/invocations` → operation `Invoke`,
+  `aws.function_name`, and a `resource_names` entry so the invoked function is
+  its own service-map node).
 - `XRayBaseClient` mutates the `http.BaseRequest` it sends to inject
   `X-Amzn-Trace-Id`; callers should treat request instances as single-use.
 - `XRay.httpClientFor(tracer, {inner})` is a convenience that wraps an
@@ -98,7 +115,7 @@ For exact runtime contracts and edge-case behavior, see
   twice — once richly by the wrapper, once as a bare host-named subsegment by
   the global patch.
 - To prevent this, `XRayBaseClient` and `XRayInterceptor` run their inner send
-  inside `runWithoutDartIoTracing` (a `Zone` flag in `trace_suppression.dart`).
+  inside `runWithoutDartIoTracing` (a `Zone` flag in `context/trace_suppression.dart`).
   `XRayHttpClient.openUrl` checks that flag and stands down, leaving exactly one
   subsegment (the wrapper's).
 - `XRay.untracedHttpClient()` remains available for the rarer case of a client
@@ -130,7 +147,7 @@ For exact runtime contracts and edge-case behavior, see
 - `handleTraced` provides request-side tracing for `dart:io` servers.
 - It extracts `x-amzn-trace-id`, reuses the upstream trace ID and parent ID when present, and runs the handler inside `XRayTracer.run`.
 - It forwards the request method and path into `XRayTracer.run`, so path/method-based sampling rules can match (rather than the `UNKNOWN` / `/` defaults).
-- It records request (`method`, `url`, `traced`) and response (`status`, `content_length`) data on the segment's `http` block via `XRayTracer.recordSegmentHttp`, so the node appears in the X-Ray service map. `content_length` reflects the length the handler declared on the response (absent when unset), not bytes written. When the handler throws before setting a status, the response block is omitted so a faulted segment is not mislabelled with the `dart:io` default `200`.
+- It records request (`method`, `url`, `traced`) and response (`status`, `content_length`) data on the segment's `http` block via `XRayTracer.recordSegmentHttp`, so the node appears in the X-Ray service map. `url` is the full request URL (`requestedUri`, scheme://host/path) per the X-Ray schema. `content_length` reflects the length the handler declared on the response (absent when unset), not bytes written. When the handler throws before setting a status, the response block is omitted so a faulted segment is not mislabelled with the `dart:io` default `200`.
 - It attempts to set the outgoing trace header on the response for downstream propagation. The sampling decision is read inside the run zone so an unsampled trace is correctly marked `Sampled=0`.
 
 ## Sampling
@@ -138,12 +155,12 @@ For exact runtime contracts and edge-case behavior, see
 - The package defines a pluggable `SamplingStrategy` interface.
 - Default implementation is `FixedRateSampler(0.05)`.
 - A `ReservoirSampler` is also included for more advanced sampling behavior.
-- Sampling is decided once on `XRayTracer.run` entry and stored in the zone, ensuring consistency for all downstream subsegments.
+- Sampling is decided once on trace entry (`XRayTracer.trace` delegates to `run`) and stored in the zone, ensuring consistency for all downstream subsegments.
 - The bundled strategies are **local-only**: each isolate decides independently with no call to the X-Ray sampling API, and there is no centralized-rule fallback (the local strategy is authoritative). `ReservoirSampler`'s budget is therefore per isolate. Outside any `run` zone the decision fails open (always sampled).
 
 ## Runtime entity model
 
-- While a trace is active, the zone holds a mutable `TraceScope` tree (`trace_scope.dart`): the root scope mirrors the `Segment`, and each `captureAsync` call forks a child scope bound to a child `Zone`.
+- While a trace is active, the zone holds a mutable `TraceScope` tree (`context/trace_scope.dart`): the root scope mirrors the `Segment`, and each `captureAsync` call forks a child scope bound to a child `Zone`.
 - Subsegments, annotations, and metadata accumulate on the current scope and are serialized onto the immutable `Segment` / `Subsegment` documents only when the scope closes — immutability is preserved at the serialization boundary, mutability is confined to the open scope.
 - Annotations are validated at every entry point (`annotation.dart`): keys are sanitized to X-Ray's `[A-Za-z0-9_]` set and non-scalar values are coerced to strings (sanitize, never throw). Metadata is unvalidated (any JSON-serializable value) by design.
 - `beginSubsegment` captures its parent scope in a per-trace registry keyed by id, so `endSubsegment` attaches it to the correct parent even when begin and end happen in different zones (e.g. an HTTP response body consumed after the request returns).
@@ -174,6 +191,8 @@ For exact runtime contracts and edge-case behavior, see
 
 ```text
 Application
+   ├─> XRayTracer.trace(name, fn)        (or XRay.trace via the global tracer)
+   │      └─ builds the Segment (fresh or continued from traceHeader), then:
    ├─> XRayTracer.run(segment, fn)
    │      ├─ active zone context
    │      ├─ sampling decision
