@@ -151,16 +151,22 @@ How the SDK records errors, faults, and throttle responses:
 | 5xx (server fault) | `fault = true` |
 | Unhandled exception | `fault = true`, `cause` object |
 
+Also the one example that uses `tracer.run()` with a pre-built `Segment` —
+the intended pattern when flags (`withError` / `withFault` / `withThrottle`)
+must be applied before the segment runs; everywhere else prefer
+`tracer.trace()`.
+
 ```bash
 dart run example/error_handling.dart
 ```
 
 ### 7. [server_middleware.dart](server_middleware.dart)
 
-Server-side request tracing middleware pattern.  Shows how to create a
-top-level segment for each incoming request, run the handler inside
-`tracer.run()`, and propagate the trace context from an upstream
-`X-Amzn-Trace-Id` header — the standard entry-point pattern for HTTP servers.
+Server-side request tracing with `handleTraced()` — one call per incoming
+request that parses the upstream `X-Amzn-Trace-Id` header, opens the segment,
+runs the handler inside it, and sets the response trace header for downstream
+propagation.  The standard entry-point pattern for `dart:io` HTTP servers;
+nested work inside a handler uses `captureAsync`.
 
 ```bash
 dart run example/server_middleware.dart
@@ -253,7 +259,7 @@ trace is active in the current Zone:
 ```dart
 final tracer = XRay.tracer;              // global default; no-op if unconfigured
 
-if (tracer.currentSegment != null) {     // are we inside a tracer.run() zone?
+if (tracer.currentSegment != null) {     // are we inside a trace zone?
   final sub = tracer.beginSubsegment('my-library-op');
   try {
     // ... do work ...

@@ -100,7 +100,7 @@ scripts/
   workflows/
     ci.yml                   # push/PR to main: format + analyze + test (stable + beta)
     commitlint.yml           # PR: Conventional Commit title check
-    release.yml              # main: auto-tag vX.Y.Z on pubspec version bump (needs RELEASE_PAT)
+    tag-release.yml          # "Release" button: validate, push vX.Y.Z tag, dispatch publish
     publish.yml              # tag v*.*.*: test -> GitHub Release -> pub publish (OIDC)
 ```
 
@@ -256,32 +256,27 @@ parent workspace (one level up from this package, not tracked in the SDK repo).
   `dart analyze --fatal-warnings` and `dart test` run on both; the format check
   and `dart pub publish --dry-run` run on stable only.
 - **Commit lint** (`commitlint.yml`): validates PR titles as Conventional Commits.
-- **Auto-release** (`release.yml`): triggers on a push to `main` that changes
-  `version:` in `pubspec.yaml`. Verifies a matching `## X.Y.Z` CHANGELOG
-  section exists, then pushes the `vX.Y.Z` tag using the `RELEASE_PAT` repo
-  secret. Idempotent — skips when the version is unchanged or the tag exists.
-- **Publish** (`publish.yml`): triggers on a `v*.*.*` tag. Jobs run in order
-  `test` (stable + beta) -> `github-release` (verify tag matches `pubspec.yaml`,
-  create the Release from the matching `CHANGELOG.md` section) -> `publish`
-  (Dart's reusable `dart-lang/setup-dart/.github/workflows/publish.yml@v1`,
-  via OIDC, no stored token). Requires pub.dev automated publishing enabled
-  for the repo with tag pattern `v{{version}}`.
+- **Release** (`tag-release.yml`): the manual release button (Actions -> Run
+  workflow on `main`; never fires on merges). Validates the pubspec version has
+  a matching `## X.Y.Z` CHANGELOG section and no existing tag, pushes `vX.Y.Z`,
+  then dispatches `publish.yml` on that tag (the `workflow_dispatch` API is
+  exempt from the GITHUB_TOKEN no-recursive-triggers rule, and running on the
+  tag ref is what pub.dev's OIDC exchange requires).
+- **Publish** (`publish.yml`): runs on a `v*.*.*` tag (push or
+  `workflow_dispatch` on the tag). Jobs run in order `test` (stable + beta) ->
+  `github-release` (verify tag matches `pubspec.yaml`, create the Release from
+  the matching `CHANGELOG.md` section) -> `publish` (Dart's reusable
+  `dart-lang/setup-dart/.github/workflows/publish.yml@v1`, via OIDC, no stored
+  token). Requires pub.dev automated publishing enabled for the repo with tag
+  pattern `v{{version}}`.
 
 **To release:** bump `pubspec.yaml`, add a matching `## X.Y.Z` section to
-`CHANGELOG.md`, and merge to `main` — `release.yml` tags automatically and
-`publish.yml` takes it from the tag.
+`CHANGELOG.md`, merge to `main`, then Actions -> **Release** -> Run workflow.
+Everything from the tag to pub.dev runs automatically from there.
 
-Two constraints shape this pipeline: a tag pushed with the default
-`GITHUB_TOKEN` cannot trigger `publish.yml` (GitHub blocks recursive workflow
-runs), and pub.dev's OIDC exchange only accepts runs triggered by a matching
-tag ref — so `release.yml` must tag with a PAT and cannot publish directly.
-One-time setup: create a fine-grained PAT with **Contents: Read and write** on
-this repo and save it as the `RELEASE_PAT` secret. Manual tagging remains a
-valid fallback (e.g. if the secret is unset):
-```bash
-git tag -a vX.Y.Z -m "Release X.Y.Z"
-git push origin vX.Y.Z
-```
+CLI fallback: `git tag -a vX.Y.Z -m "Release X.Y.Z" && git push origin vX.Y.Z`
+— a locally pushed tag triggers `publish.yml` directly. To retry a failed
+publish, dispatch **Publish to pub.dev** on the existing tag.
 
 ---
 

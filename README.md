@@ -41,6 +41,7 @@ invoke — so a slow dependency is obvious at a glance in the X-Ray service map.
 
 | | |
 |---|---|
+| ⚡ **One-call tracing** | `XRay.trace('op', fn)` — segment lifecycle in a single call; `traceHeader:` links into the caller's distributed trace |
 | 🔍 **Automatic HTTP tracing** | Patch `dart:io` globally — every `HttpClient` call gets a subsegment with method, URL, and status |
 | ☁️ **AWS SDK client wrapping** | Instrument any Smithy-generated client (DynamoDB, S3, KMS, …) via `XRay.fromClient<T>()` |
 | λ **Lambda-native** | `runLambda()` attaches to the auto-created Lambda segment instead of competing with it |
@@ -135,8 +136,7 @@ void main() async {
   final tracer = XRayTracer(serviceName: 'my-service');
   XRay.patchHttp(tracer);          // patch dart:io globally
 
-  final segment = Segment.begin(name: 'my-service', traceId: TraceId.generate());
-  await tracer.run(segment, () async {
+  await tracer.trace('my-service', () async {
     // This HttpClient call produces a subsegment automatically:
     //   name: 'api.example.com'
     //   namespace: 'remote'   (or 'aws' for *.amazonaws.com)
@@ -158,7 +158,7 @@ Wrap any `package:http` `Client` with `XRayBaseClient`:
 
 ```dart
 final client = XRayBaseClient(http.Client(), tracer);
-await tracer.run(segment, () => client.get(Uri.parse('https://api.example.com')));
+await tracer.trace('my-op', () => client.get(Uri.parse('https://api.example.com')));
 ```
 
 `XRayBaseClient` injects the trace header into the `http.BaseRequest` it sends.
@@ -176,11 +176,12 @@ final dynamoDB = DynamoDB(
   region: 'us-east-1',
   client: XRay.httpClientFor(tracer), // every call is traced
 );
-await tracer.run(segment, () => dynamoDB.getItem(/* ... */));
+await tracer.trace('my-op', () => dynamoDB.getItem(/* ... */));
 ```
 
 For `*.amazonaws.com` hosts the subsegment is named after the service and gains
-AWS resource data (operation, table/queue/bucket) automatically — no
+AWS resource data (operation, table/queue/bucket, and — for the Lambda
+data-plane `Invoke` call — the target `function_name`) automatically; no
 `registerClient` needed (that path is for Smithy-generated clients).
 
 ### Response-body lifecycle
@@ -200,7 +201,7 @@ inside it — manual subsegments *and* auto-instrumented HTTP/AWS calls become
 children of it, so the X-Ray service map shows the real call tree:
 
 ```dart
-await tracer.run(segment, () async {
+await tracer.trace('checkout', () async {
   await tracer.captureAsync('process-order', (span) async {
     span.annotate('orderId', id);            // indexed — filterable in console
     span.addMetadata('items', cart.length);  // non-indexed detail
@@ -222,7 +223,7 @@ whatever is currently being traced — the active `captureAsync` subsegment, or
 the segment itself at the top level:
 
 ```dart
-await tracer.run(segment, () async {
+await tracer.trace('handle-request', () async {
   tracer.annotate('userId', userId);   // → segment annotations (indexed)
   tracer.addMetadata('region', 'us-east-1');
 });
@@ -246,9 +247,9 @@ annotations per trace.
 ### Missing trace context
 
 `tracer.annotate`, `addMetadata`, and the manual `beginSubsegment` /
-`endSubsegment` API only record when called inside a `tracer.run()` /
-`runLambda()` / `captureAsync()` zone. When there is no active trace, the data
-would be dropped; `ContextMissingPolicy` controls what happens:
+`endSubsegment` API only record when called inside a `tracer.trace()` /
+`run()` / `runLambda()` / `captureAsync()` zone. When there is no active trace,
+the data would be dropped; `ContextMissingPolicy` controls what happens:
 
 ```dart
 XRayTracer(
@@ -273,7 +274,7 @@ For flat, sibling subsegments (or when begin and end straddle a callback), use
 the manual API. Each attaches under whatever scope is active when it is opened:
 
 ```dart
-await tracer.run(segment, () async {
+await tracer.trace('ingest', () async {
   // Instrument any synchronous or async block:
   final sub = tracer.beginSubsegment('parse-payload');
   try {
@@ -378,8 +379,7 @@ if (parentId != null) {
   await tracer.runLambda(traceId, parentId, functionName, fn, sampled: sampled);
 } else {
   // Local testing fallback — no Lambda runtime present.
-  final segment = Segment.begin(name: functionName, traceId: traceId);
-  await tracer.run(segment, fn);
+  await tracer.trace(functionName, fn, traceHeader: rawHeader);
 }
 ```
 
@@ -489,14 +489,14 @@ to `runLambda()`.
 
 ## Sampling
 
-The sampling decision is made **once** at `tracer.run()` entry and stored in the
-zone so every downstream header injection uses the same `Sampled=1/0` flag.
-An unsampled trace is still built (so your code runs identically) but the
-segment is never sent to the daemon. Pass `httpMethod` and `urlPath` to `run()`
-to give the sampler contextual info:
+The sampling decision is made **once** at trace entry (`tracer.trace()` /
+`run()`) and stored in the zone so every downstream header injection uses the
+same `Sampled=1/0` flag. An unsampled trace is still built (so your code runs
+identically) but the segment is never sent to the daemon. Pass `httpMethod` and
+`urlPath` to give the sampler contextual info:
 
 ```dart
-await tracer.run(segment, fn, httpMethod: 'POST', urlPath: '/checkout');
+await tracer.trace('checkout', fn, httpMethod: 'POST', urlPath: '/checkout');
 ```
 
 ```dart
@@ -538,7 +538,7 @@ authoritative, and `GetSamplingRules` / `GetSamplingTargets` are not consulted
   isolate its own `XRayTracer`/`ReservoirSampler` (sharing one across isolates is
   unsupported and miscounts).
 - **No active context ⇒ always sampled.** Code that builds a segment and calls
-  `closeSegment` outside a `tracer.run()` zone is sampled fail-open (so a
+  `closeSegment` outside a trace zone is sampled fail-open (so a
   manually constructed segment is never silently dropped). Under Lambda, the
   `Sampled=` flag from the runtime trace header is forwarded as-is via
   `runLambda(..., sampled:)`.
@@ -645,6 +645,9 @@ plus one independent subsegment document per subsegment.
 Application code
        │
        ▼
+XRayTracer.trace(name, fn)        builds the Segment (fresh, or continued
+       │                          from traceHeader), then delegates to:
+       ▼
 XRayTracer.run / runLambda        Zone stores: Segment, TraceState (entity
        │                          tree + current scope), sampled
        │
@@ -672,7 +675,7 @@ XRayTracer.run / runLambda        Zone stores: Segment, TraceState (entity
 ```
 
 **Zone-based context** means you never pass the tracer or segment through
-function arguments. Any code that runs inside `tracer.run(…)` — including
+function arguments. Any code that runs inside `tracer.trace(…)` / `run(…)` — including
 library code — can call `tracer.currentSegment` to get the active segment.
 
 ---
