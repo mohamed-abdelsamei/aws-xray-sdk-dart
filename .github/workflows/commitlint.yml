@@ -1,9 +1,7 @@
 name: Commit Lint
 
-# Validates that every PR title follows Conventional Commits.
-# On a squash-merge workflow, the PR title becomes the commit message that
-# lands on main — which is what the release.yml auto-tag job reads to
-# compute the next semver bump.
+# Validates that every PR title follows Conventional Commits, keeping the
+# main-branch history readable and greppable by change type.
 #
 # Valid types: feat, fix, perf, docs, style, refactor, test, build, ci, chore, revert
 # Breaking change: append ! after the type  e.g.  feat!: drop Dart 2 support

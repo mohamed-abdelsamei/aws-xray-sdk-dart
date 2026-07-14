@@ -1,14 +1,17 @@
 name: Publish to pub.dev
 
-# Publishes to pub.dev when a release tag (v1.2.3) is pushed — either
-# automatically by release.yml (on a version bump merged to main) or manually
-# per AGENT.md.
+# Publishes to pub.dev from a release tag (v1.2.3). Normally started by the
+# "Release" workflow, which pushes the tag and dispatches this workflow on it.
+# Also fires on a directly pushed tag (CLI fallback), and can be re-run via
+# Actions -> "Publish to pub.dev" -> Run workflow -> select the tag.
 #
 # This workflow owns the full release pipeline from the tag onward: test
 # matrix -> tag/pubspec verification -> GitHub Release (from the CHANGELOG
 # section) -> pub.dev publish via Dart's official reusable workflow (OIDC —
-# no stored token). pub.dev only accepts runs triggered by a matching tag,
-# which is why release.yml tags with a PAT instead of publishing directly.
+# no stored token). pub.dev's OIDC exchange only accepts runs on a ref
+# matching the configured tag pattern — push and workflow_dispatch runs on
+# the tag both qualify; a dispatch from a branch is rejected by the guard
+# below (and would be rejected by pub.dev anyway).
 #
 # pub.dev automated publishing must be enabled for this to succeed:
 #   https://pub.dev/packages/aws_xray_sdk/admin
@@ -19,6 +22,7 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
 
 jobs:
   # Gate: the reusable publish workflow does not run tests, so verify the
@@ -31,6 +35,12 @@ jobs:
       matrix:
         sdk: [stable, beta]
     steps:
+      - name: Require a tag ref
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::This workflow must run on a release tag. Use 'Run workflow' and select the vX.Y.Z tag (not a branch)."
+          exit 1
+
       - uses: actions/checkout@v7
 
       - uses: dart-lang/setup-dart@v1
@@ -105,7 +115,7 @@ jobs:
           echo "$NOTES" > "$RUNNER_TEMP/release_notes.md"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3 # v3 runs on node24
         with:
           tag_name:   ${{ github.ref_name }}
           name:       ${{ github.ref_name }}
@@ -115,6 +125,12 @@ jobs:
   # Publish only after tests pass and the GitHub Release is created. Dart's
   # reusable workflow provisions the OIDC token, runs its own publish dry-run,
   # then publishes to pub.dev (no stored token).
+  #
+  # Node 20 deprecation warning: every released tag of this reusable workflow
+  # (through v1.7.2) still pins a node20 setup-dart internally; only their main
+  # has the node24 pin. @v1 floats with their v1.x releases, so the warning
+  # disappears on their next tag — deliberately not pinning @main for a
+  # publish workflow.
   publish:
     needs: github-release
     permissions:

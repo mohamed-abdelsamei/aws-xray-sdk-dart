@@ -1,0 +1,71 @@
+name: Release
+
+# The manual release button: Actions -> "Release" -> Run workflow (on main).
+# Releases are never created automatically on merges to main — only by
+# running this workflow.
+#
+# It reads `version:` from pubspec.yaml on the selected ref, validates the
+# release metadata, pushes the annotated tag `vX.Y.Z`, and then dispatches
+# "Publish to pub.dev" on that tag, which runs the rest of the pipeline
+# (test matrix -> GitHub Release -> pub.dev publish).
+#
+# Why the explicit dispatch: a tag pushed with GITHUB_TOKEN cannot trigger
+# other workflows (GitHub blocks token-caused push events), but the
+# workflow_dispatch API is exempt from that rule — so this workflow starts
+# publish.yml directly on the tag ref, which is also what pub.dev's OIDC
+# exchange requires.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the tag
+  actions: write # dispatch publish.yml
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and start publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          TAG="v${VERSION}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          if git ls-remote --tags --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists — bump pubspec.yaml first."
+            exit 1
+          fi
+          if ! grep -qE "^## ${VERSION}( |$)" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::No '## ${VERSION}' section — publish.yml needs it to build the GitHub Release."
+            exit 1
+          fi
+          echo "✅ Releasing ${VERSION} as ${TAG} from $(git rev-parse --short HEAD)."
+
+      - name: Create and push tag
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "Release ${{ steps.meta.outputs.version }}"
+          git push origin "$TAG"
+
+      - name: Start publish pipeline on the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          echo "::notice::Dispatched 'Publish to pub.dev' on ${TAG} — the pipeline (test -> GitHub Release -> pub.dev) is running."
