@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.1
+
+Docs and release-tooling release — no library code changes.
+
+- **One-button releases**: the "Release" workflow now auto-increments the
+  version (patch/minor/major choice, patch by default) and generates a
+  CHANGELOG section from commits when none is written, then tags and
+  triggers the publish pipeline. A manual pubspec bump / hand-written
+  section still wins. Releases are never created on merges to main.
+- **Docs modernized to the `trace()` API**: README and examples now lead
+  with `tracer.trace()` / `XRay.trace()`; `run()` is documented for its two
+  remaining use cases (pre-built segments, `runLambdaInvocation` internals).
+  Architecture and tracing-behavior docs updated to match, including the
+  Lambda `Invoke` → `aws.function_name` capture and full-URL recording.
+
 ## 0.4.0
 
 One-call tracing ergonomics: configure once, then trace any unit of work in a

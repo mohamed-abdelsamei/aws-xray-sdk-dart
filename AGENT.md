@@ -100,7 +100,7 @@ scripts/
   workflows/
     ci.yml                   # push/PR to main: format + analyze + test (stable + beta)
     commitlint.yml           # PR: Conventional Commit title check
-    tag-release.yml          # "Release" button: validate, push vX.Y.Z tag, dispatch publish
+    tag-release.yml          # "Release" button: bump version, tag vX.Y.Z, dispatch publish
     publish.yml              # tag v*.*.*: test -> GitHub Release -> pub publish (OIDC)
 ```
 
@@ -257,11 +257,15 @@ parent workspace (one level up from this package, not tracked in the SDK repo).
   and `dart pub publish --dry-run` run on stable only.
 - **Commit lint** (`commitlint.yml`): validates PR titles as Conventional Commits.
 - **Release** (`tag-release.yml`): the manual release button (Actions -> Run
-  workflow on `main`; never fires on merges). Validates the pubspec version has
-  a matching `## X.Y.Z` CHANGELOG section and no existing tag, pushes `vX.Y.Z`,
-  then dispatches `publish.yml` on that tag (the `workflow_dispatch` API is
-  exempt from the GITHUB_TOKEN no-recursive-triggers rule, and running on the
-  tag ref is what pub.dev's OIDC exchange requires).
+  workflow on `main`; never fires on merges). Resolves the version — an
+  unreleased pubspec version is used as-is; an already-tagged one is
+  auto-incremented by the chosen bump level (patch default) and written back.
+  Generates a `## X.Y.Z` CHANGELOG section from commit subjects when none is
+  hand-written, commits any pubspec/CHANGELOG change as
+  `chore(release): X.Y.Z`, pushes `vX.Y.Z`, then dispatches `publish.yml` on
+  that tag (the `workflow_dispatch` API is exempt from the GITHUB_TOKEN
+  no-recursive-triggers rule, and running on the tag ref is what pub.dev's
+  OIDC exchange requires).
 - **Publish** (`publish.yml`): runs on a `v*.*.*` tag (push or
   `workflow_dispatch` on the tag). Jobs run in order `test` (stable + beta) ->
   `github-release` (verify tag matches `pubspec.yaml`, create the Release from
@@ -270,9 +274,12 @@ parent workspace (one level up from this package, not tracked in the SDK repo).
   token). Requires pub.dev automated publishing enabled for the repo with tag
   pattern `v{{version}}`.
 
-**To release:** bump `pubspec.yaml`, add a matching `## X.Y.Z` section to
-`CHANGELOG.md`, merge to `main`, then Actions -> **Release** -> Run workflow.
-Everything from the tag to pub.dev runs automatically from there.
+**To release:** Actions -> **Release** -> Run workflow, picking the bump
+level (patch/minor/major). Everything — version bump, CHANGELOG section, tag,
+GitHub Release, pub.dev publish — runs automatically from there. For curated
+release notes or a pre-release version (e.g. `0.5.0-beta.1`), bump
+`pubspec.yaml` and/or write the `## X.Y.Z` section by hand, merge to `main`
+first, and the workflow uses them as-is.
 
 CLI fallback: `git tag -a vX.Y.Z -m "Release X.Y.Z" && git push origin vX.Y.Z`
 — a locally pushed tag triggers `publish.yml` directly. To retry a failed
@@ -288,7 +295,7 @@ publish, dispatch **Publish to pub.dev** on the existing tag.
 - `dart analyze --fatal-warnings` must pass clean — enforced in CI.
 - `pubspec.lock` is gitignored (library, not an app).
 - One runtime dependency: `http` (for `XRayBaseClient`); otherwise only `dart:io` / `dart:convert` / `dart:async`.
-- Releases are tagged manually on a commit that already contains `publish.yml`; CI never creates tags.
+- Release tags come only from the manual **Release** workflow (or a hand-pushed `git tag`); nothing tags or publishes on merges to `main`.
 
 ---
 
