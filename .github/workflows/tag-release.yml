@@ -4,10 +4,22 @@ name: Release
 # Releases are never created automatically on merges to main — only by
 # running this workflow.
 #
-# It reads `version:` from pubspec.yaml on the selected ref, validates the
-# release metadata, pushes the annotated tag `vX.Y.Z`, and then dispatches
-# "Publish to pub.dev" on that tag, which runs the rest of the pipeline
-# (test matrix -> GitHub Release -> pub.dev publish).
+# Version resolution:
+#   - If pubspec.yaml already holds an unreleased version (no vX.Y.Z tag
+#     yet), that version is released as-is — a manual bump wins.
+#   - Otherwise the workflow auto-increments the version by the chosen bump
+#     level (patch by default), writes it to pubspec.yaml, and commits.
+#   Pre-release versions (e.g. 0.5.0-beta.1) always take the manual path:
+#   bump pubspec.yaml by hand, then run this workflow.
+#
+# CHANGELOG: if no `## X.Y.Z` section exists for the release version, one is
+# generated from the commit subjects since the last tag. A hand-written
+# section always wins — add it before pressing Release for curated notes.
+#
+# Any pubspec/CHANGELOG change is committed to main as
+# `chore(release): X.Y.Z`, then the annotated tag `vX.Y.Z` is pushed and
+# "Publish to pub.dev" is dispatched on it, which runs the rest of the
+# pipeline (test matrix -> GitHub Release -> pub.dev publish).
 #
 # Why the explicit dispatch: a tag pushed with GITHUB_TOKEN cannot trigger
 # other workflows (GitHub blocks token-caused push events), but the
@@ -17,9 +29,18 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump when pubspec is already released'
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
-  contents: write # push the tag
+  contents: write # push the release commit and tag
   actions: write # dispatch publish.yml
 
 concurrency:
@@ -28,38 +49,85 @@ concurrency:
 
 jobs:
   release:
-    name: Tag and start publish
+    name: Version, tag, and start publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # tags + history for version and changelog generation
 
-      - name: Validate release metadata
+      - name: Resolve release version
         id: meta
         run: |
           set -euo pipefail
-          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          CURRENT=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+
+          if git ls-remote --tags --exit-code origin "refs/tags/v${CURRENT}" >/dev/null 2>&1; then
+            # pubspec version is already released — auto-increment it.
+            BASE="${CURRENT%%-*}" # strip any pre-release suffix
+            IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
+            case "${{ inputs.bump }}" in
+              major) VERSION="$((MAJOR + 1)).0.0" ;;
+              minor) VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
+              *)     VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+            esac
+            echo "Auto-incrementing ${CURRENT} -> ${VERSION} (${{ inputs.bump }})."
+            sed -i "s/^version: .*/version: ${VERSION}/" pubspec.yaml
+          else
+            # pubspec holds an unreleased version — release it as-is.
+            VERSION="$CURRENT"
+            echo "Releasing manually bumped version ${VERSION}."
+          fi
+
           TAG="v${VERSION}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
           if git ls-remote --tags --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "::error::Tag ${TAG} already exists — bump pubspec.yaml first."
+            echo "::error::Tag ${TAG} already exists."
             exit 1
           fi
-          if ! grep -qE "^## ${VERSION}( |$)" CHANGELOG.md; then
-            echo "::error file=CHANGELOG.md::No '## ${VERSION}' section — publish.yml needs it to build the GitHub Release."
-            exit 1
-          fi
-          echo "✅ Releasing ${VERSION} as ${TAG} from $(git rev-parse --short HEAD)."
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Create and push tag
+      - name: Ensure CHANGELOG section
         run: |
           set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          if grep -qE "^## ${VERSION}( |$)" CHANGELOG.md; then
+            echo "✅ Hand-written '## ${VERSION}' section found."
+            exit 0
+          fi
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          RANGE=${LAST_TAG:+${LAST_TAG}..HEAD}
+          NOTES=$(git log --no-merges --pretty='- %s' ${RANGE:-HEAD})
+          if [ -z "$NOTES" ]; then
+            echo "::error::No commits since ${LAST_TAG:-the beginning} — nothing to release."
+            exit 1
+          fi
+          # Insert the generated section right below the "# Changelog" header.
+          {
+            head -n 1 CHANGELOG.md
+            echo ""
+            echo "## ${VERSION}"
+            echo ""
+            echo "$NOTES"
+            tail -n +2 CHANGELOG.md
+          } > CHANGELOG.md.new && mv CHANGELOG.md.new CHANGELOG.md
+          echo "✅ Generated '## ${VERSION}' section from commits since ${LAST_TAG:-the first commit}."
+
+      - name: Commit, tag, and push
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
           TAG="${{ steps.meta.outputs.tag }}"
           git config user.name  'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git tag -a "$TAG" -m "Release ${{ steps.meta.outputs.version }}"
+          if ! git diff --quiet; then
+            git add pubspec.yaml CHANGELOG.md
+            git commit -m "chore(release): ${VERSION}"
+            git push origin HEAD:main
+          fi
+          git tag -a "$TAG" -m "Release ${VERSION}"
           git push origin "$TAG"
+          echo "✅ Tagged ${TAG} at $(git rev-parse --short HEAD)."
 
       - name: Start publish pipeline on the tag
         env:
