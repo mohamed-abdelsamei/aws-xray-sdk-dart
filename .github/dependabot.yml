@@ -22,8 +22,8 @@ updates:
       - mohamed-abdelsamei
 
   # ── Dart / pub ────────────────────────────────────────────────────────────
-  # aws_xray_sdk has no runtime dependencies, but dev deps (lints, test)
-  # should stay current so CI tests reflect the latest tooling.
+  # Keep the runtime dependency (http) and dev deps (lints, test) current so
+  # CI tests reflect the latest tooling.
   - package-ecosystem: pub
     directory: /
     schedule:
@@ -37,5 +37,4 @@ updates:
       - dart
     reviewers:
       - mohamed-abdelsamei
-    # Keep dev-only bumps out of the critical path — open as draft PRs.
     open-pull-requests-limit: 5

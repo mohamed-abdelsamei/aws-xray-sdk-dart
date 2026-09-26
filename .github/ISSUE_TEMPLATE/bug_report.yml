@@ -1,0 +1,74 @@
+name: Bug report
+description: Something in aws_xray_sdk doesn't work as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please strip any AWS
+        account IDs, ARNs, credentials, or PII from logs and segment dumps.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest Dart snippet that reproduces the problem.
+      render: dart
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: |
+        Error messages, stack traces, or the emitted segment JSON
+        (`InMemorySender` is handy for capturing it).
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: aws_xray_sdk version
+      placeholder: "0.4.1"
+    validations:
+      required: true
+  - type: input
+    id: dart
+    attributes:
+      label: Dart SDK version
+      description: Output of `dart --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Runtime environment
+      options:
+        - AWS Lambda (provided:al2023 / custom runtime)
+        - ECS / Fargate
+        - EC2
+        - Local machine with X-Ray daemon
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Tracer / segments / subsegments
+        - dart:io HTTP patching (XRay.patchHttp)
+        - package:http client (XRayBaseClient)
+        - AWS SDK client wrapping (XRay.fromClient)
+        - Lambda integration
+        - Sampling
+        - UDP sender / daemon delivery
+        - Server middleware (handleTraced)
+        - Documentation
+        - Other

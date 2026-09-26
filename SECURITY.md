@@ -41,8 +41,9 @@ This package is a tracing client. Relevant security areas include:
   credentials, or PII from HTTP headers or request bodies
 - **Denial of service** — malformed segment data causing excessive CPU/memory use
 - **UDP injection** — crafted trace IDs or segment documents that corrupt daemon state
-- **Dependency vulnerabilities** — this package has no runtime dependencies, but
-  dev-dependencies (`lints`, `test`, `mocktail`) are kept current via Dependabot
+- **Dependency vulnerabilities** — the only runtime dependency is
+  [`http`](https://pub.dev/packages/http); it and the dev-dependencies
+  (`lints`, `test`) are kept current via Dependabot
 
 Out of scope: issues in the AWS X-Ray service itself, the X-Ray daemon, or AWS SDKs.
 Those should be reported through [AWS Security](https://aws.amazon.com/security/vulnerability-reporting/).
