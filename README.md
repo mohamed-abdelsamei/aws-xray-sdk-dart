@@ -1,5 +1,10 @@
 # [aws_xray_sdk](https://pub.dev/packages/aws_xray_sdk)
 
+[![pub package](https://img.shields.io/pub/v/aws_xray_sdk.svg)](https://pub.dev/packages/aws_xray_sdk)
+[![pub points](https://img.shields.io/pub/points/aws_xray_sdk)](https://pub.dev/packages/aws_xray_sdk/score)
+[![CI](https://github.com/mohamed-abdelsamei/aws-xray-sdk-dart/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mohamed-abdelsamei/aws-xray-sdk-dart/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A Dart package for distributed tracing with [AWS X-Ray](https://aws.amazon.com/xray/).
 
 Traces outbound HTTP calls and AWS SDK operations, propagates the
@@ -53,8 +58,6 @@ invoke — so a slow dependency is obvious at a glance in the X-Ray service map.
 ---
 
 ## Installation
-
-[![pub package](https://img.shields.io/pub/v/aws_xray_sdk.svg)](https://pub.dev/packages/aws_xray_sdk)
 
 ```bash
 dart pub add aws_xray_sdk
@@ -750,6 +753,11 @@ lib/
 ---
 
 ## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+workflow, PR conventions, and the checks CI runs. Please follow the
+[Code of Conduct](CODE_OF_CONDUCT.md), and report security issues privately as
+described in [SECURITY.md](SECURITY.md).
 
 ```bash
 git clone https://github.com/mohamed-abdelsamei/aws-xray-sdk-dart.git
