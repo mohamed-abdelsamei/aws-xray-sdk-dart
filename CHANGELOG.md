@@ -4,13 +4,17 @@
 
 ### Fixed
 
-- **Lambda traces over 64 KB are no longer dropped.** `runLambda` sent the
+- **Large Lambda traces are no longer dropped.** `runLambda` sent the
   whole handler subsegment tree as a single UDP datagram, so a large
-  invocation exceeded the daemon's 64 KB limit and the entire trace was lost.
+  invocation exceeded the datagram limit and the entire trace was lost.
   It now uses the same recursive split as standalone segments: the handler
   document is emitted without its children, and each child becomes its own
   subsegment document linked by `parent_id`. Small documents are unchanged,
   byte for byte.
+- **Split threshold lowered to the real UDP limit.** The encoder split
+  documents above 65536 bytes, but an IPv4 UDP datagram carries at most 65507,
+  so documents of 65508 to 65536 bytes were sent as one datagram and failed.
+  The cap is now 65507 bytes for both `encode()` and Lambda documents.
 - **`AWS_XRAY_DAEMON_ADDRESS` parsing is stricter and broader.** `configure`
   now understands `[v6]:port`, bare IPv6 literals (`::1`), and the dual
   `tcp:h:p udp:h:p` form in either order (the `udp:` address is used).

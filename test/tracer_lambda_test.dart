@@ -278,7 +278,7 @@ void main() {
       expect(sender.lastDoc.containsKey('namespace'), isFalse);
     });
 
-    test('oversized handler doc is split into linked docs within 64 KB',
+    test('oversized handler doc is split into linked docs within 65507 bytes',
         () async {
       final big = 'x' * (20 * 1024);
       await tracer.runLambda(traceId, parentId, 'handler', () async {
@@ -291,7 +291,7 @@ void main() {
 
       expect(sender.packets.length, greaterThan(1));
       final docs = sender.packets.map((p) {
-        expect(p.length, lessThanOrEqualTo(64 * 1024));
+        expect(p.length, lessThanOrEqualTo(65507));
         final raw = utf8.decode(p);
         return jsonDecode(raw.substring(raw.indexOf('\n') + 1))
             as Map<String, Object?>;
@@ -329,7 +329,7 @@ void main() {
       });
 
       for (final p in sender.packets) {
-        expect(p.length, lessThanOrEqualTo(64 * 1024));
+        expect(p.length, lessThanOrEqualTo(65507));
       }
       final docs = sender.docs;
       expect(docs.map((d) => d['name']),

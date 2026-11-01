@@ -67,7 +67,7 @@ For exact runtime contracts and edge-case behavior, see
   - resolves host name and binds sockets for IPv4/IPv6 as needed.
 - `segment_encoder.dart`
   - encodes a segment into one or more JSON payloads with the X-Ray UDP header.
-  - emits independent subsegment documents when payloads exceed 64 KB.
+  - emits independent subsegment documents when payloads exceed the 65507-byte UDP datagram cap.
 
 ## HTTP tracing
 

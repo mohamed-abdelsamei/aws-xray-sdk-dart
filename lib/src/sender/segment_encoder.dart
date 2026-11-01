@@ -2,13 +2,16 @@ import 'dart:convert';
 import '../models/segment.dart';
 import '../models/subsegment.dart';
 
-/// Maximum size of a single segment document the X-Ray daemon accepts over UDP.
-/// Per the X-Ray API guide, the segment-document limit is 64 KB; oversized
-/// segments must be split into independent subsegment documents.
-const _maxUdpBytes = 64 * 1024; // 64 KB
+/// Maximum size of a single UDP datagram payload sent to the X-Ray daemon.
+///
+/// The X-Ray segment-document limit is 64 KB, but a UDP datagram over IPv4
+/// can carry at most 65507 bytes (65535 − 8 UDP header − 20 IP header), so
+/// that is the real ceiling. Oversized segments are split into independent
+/// subsegment documents.
+const _maxUdpBytes = 65507;
 const _header = '{"format":"json","version":1}';
 
-/// Encodes a [Segment] into one or more UDP payloads, each ≤ 64 KB.
+/// Encodes a [Segment] into one or more UDP payloads, each ≤ 65507 bytes.
 ///
 /// If the serialized segment fits in one datagram it is returned as a single
 /// entry. Otherwise the segment skeleton (no `subsegments`) is emitted first,
@@ -41,7 +44,7 @@ List<List<int>> encode(Segment segment) {
 
 /// Encodes [sub] as one or more independent subsegment documents parented to
 /// [parentId], splitting it the same way [encode] splits an oversized
-/// segment's children so every datagram stays within the 64 KB cap.
+/// segment's children so every datagram stays within the 65507-byte cap.
 ///
 /// [json] overrides `sub.toJson()` for the root document only (e.g. with a
 /// field removed); descendants always use their own `toJson()`.

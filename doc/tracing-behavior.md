@@ -379,8 +379,9 @@ flowchart TD
 - `UdpSender` is the default sender.
 - UDP payloads use the X-Ray daemon header:
   `{"format":"json","version":1}` followed by a newline and JSON document.
-- If a segment document with many subsegments exceeds 64 KB, the encoder emits a
-  segment skeleton followed by independent subsegment documents.
+- If a segment document with many subsegments exceeds 65507 bytes (the maximum
+  IPv4 UDP payload; the X-Ray document limit itself is 64 KB), the encoder
+  emits a segment skeleton followed by independent subsegment documents.
 - `encodeSubsegmentDoc` injects the required `type`, `parent_id`, and `trace_id`
   fields for independent subsegment documents.
 - Sender failures are contained by `XRayTracer.run`, `runLambda`,
@@ -390,8 +391,8 @@ flowchart TD
 
 Known encoding boundary: the current encoder splits large segments with multiple
 subsegments, but it does not truncate a single oversized subsegment document.
-Keep individual subsegment metadata/cause payloads well below the X-Ray daemon's
-64 KB UDP payload limit.
+Keep individual subsegment metadata/cause payloads well below the 65507-byte UDP
+datagram limit.
 
 ## Supported Runtimes And Scope
 

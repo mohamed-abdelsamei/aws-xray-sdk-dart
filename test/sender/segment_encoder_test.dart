@@ -32,7 +32,7 @@ void main() {
     });
 
     test('oversized segment splits into multiple payloads', () {
-      // Build a segment with many subsegments to push it over 64 KB.
+      // Build a segment with many subsegments to push it over the 65507-byte cap.
       var segment = Segment.begin(name: 'svc', traceId: TraceId.generate());
       for (var i = 0; i < 200; i++) {
         final sub = Subsegment.begin(name: 'op-$i', namespace: 'aws')
@@ -45,7 +45,7 @@ void main() {
       final payloads = enc.encode(segment);
       expect(payloads.length, greaterThan(1));
       for (final p in payloads) {
-        expect(p.length, lessThanOrEqualTo(64 * 1024));
+        expect(p.length, lessThanOrEqualTo(65507));
       }
     });
 
@@ -82,7 +82,7 @@ void main() {
 
     test('recursively splits a subsegment whose children overflow the cap', () {
       // One top-level subsegment with many large children: inlined, its own
-      // document exceeds 64 KB, so it must be split into the node + each child
+      // document exceeds the 65507-byte cap, so it must be split into the node + each child
       // re-parented to it.
       var big = Subsegment.begin(name: 'parent', namespace: 'aws');
       for (var i = 0; i < 200; i++) {
@@ -99,7 +99,7 @@ void main() {
 
       final payloads = enc.encode(segment);
       for (final p in payloads) {
-        expect(p.length, lessThanOrEqualTo(64 * 1024));
+        expect(p.length, lessThanOrEqualTo(65507));
       }
 
       // The children must be parented to the big subsegment, not the segment.
@@ -115,8 +115,38 @@ void main() {
     });
   });
 
+  group('encode datagram cap', () {
+    const cap = 65507;
+
+    // A closed segment with one child, padded via an annotation so its
+    // single-document encoding is exactly [size] bytes.
+    Segment sized(int size) {
+      final seg = Segment.begin(name: 'svc', traceId: TraceId.generate())
+          .addSubsegment(Subsegment.begin(name: 'child').close())
+          .close();
+      final base = enc.encode(seg.annotate('pad', ''))[0].length;
+      return seg.annotate('pad', 'x' * (size - base));
+    }
+
+    test('a document of exactly 65507 bytes is one packet', () {
+      final out = enc.encode(sized(cap));
+      expect(out, hasLength(1));
+      expect(out[0], hasLength(cap));
+    });
+
+    for (final size in [cap + 1, 64 * 1024]) {
+      test('a $size-byte document is split, every packet <= $cap', () {
+        final out = enc.encode(sized(size));
+        expect(out, hasLength(2));
+        for (final p in out) {
+          expect(p.length, lessThanOrEqualTo(cap));
+        }
+      });
+    }
+  });
+
   group('encodeSubsegmentDocs', () {
-    const cap = 64 * 1024;
+    const cap = 65507;
     const parentId = 'abcdef1234567890';
     final traceId = TraceId.generate().toString();
 

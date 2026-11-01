@@ -637,8 +637,9 @@ Key fields:
 }
 ```
 
-Oversized segments (> 64 KB) are automatically split into a skeleton segment
-plus one independent subsegment document per subsegment.
+Oversized segments (> 65507 bytes, the maximum IPv4 UDP payload) are
+automatically split into a skeleton segment plus one independent subsegment
+document per subsegment.
 
 ---
 
