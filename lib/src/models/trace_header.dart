@@ -1,3 +1,5 @@
+import 'trace_id.dart';
+
 /// Builds the `X-Amzn-Trace-Id` header value.
 ///
 /// [traceId] is the string form of the root trace ID (`1-{8 hex}-{24 hex}`) and
@@ -16,7 +18,7 @@ String buildTraceHeader({
   required bool sampled,
 }) {
   assert(
-    _isValidTraceId(traceId),
+    isValidTraceId(traceId),
     'buildTraceHeader: "$traceId" is not a valid X-Ray trace id '
     '(1-{8 hex}-{24 hex})',
   );
@@ -27,7 +29,18 @@ String buildTraceHeader({
   return 'Root=$traceId;Parent=$segmentId;Sampled=${sampled ? 1 : 0}';
 }
 
-bool _isValidTraceId(String value) {
+/// The upstream `Parent=` id from [header], or `null` when it must not be
+/// trusted: the `Root` is missing/invalid (the caller starts a fresh trace, so
+/// a parent from another trace would orphan it) or the parent is not 16 hex
+/// chars.
+String? validParentId(String header) {
+  if (TraceId.tryParse(header) == null) return null;
+  final parent = TraceId.parseParentId(header);
+  return parent != null && _isHexId(parent, 16) ? parent : null;
+}
+
+/// Whether [value] is a well-formed `1-{8 hex}-{24 hex}` trace id.
+bool isValidTraceId(String value) {
   final parts = value.split('-');
   if (parts.length != 3 || parts[0] != '1') return false;
   return _isHexId(parts[1], 8) && _isHexId(parts[2], 24);

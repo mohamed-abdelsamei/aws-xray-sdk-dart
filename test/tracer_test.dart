@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
 class _RecordingSender extends Sender {
@@ -402,6 +404,44 @@ void main() {
 
       expect(sender.last['trace_id'], matches(r'^1-[0-9a-f]{8}-[0-9a-f]{24}$'));
       expect(sender.last.containsKey('parent_id'), isFalse);
+    });
+
+    test('malformed Parent under a valid Root is omitted (AC10.3)', () async {
+      final upstream = TraceId.generate();
+      await tracer.trace('op', () async {},
+          traceHeader: 'Root=$upstream;Parent=xyz;Sampled=1');
+
+      expect(sender.last['trace_id'], upstream.toString());
+      expect(sender.last.containsKey('parent_id'), isFalse);
+    });
+
+    test('malformed headers never raise AssertionError downstream (AC10.4)',
+        () async {
+      // Each header is continued into a traced outbound call, which builds an
+      // X-Amzn-Trace-Id with asserts enabled.
+      final headers = [
+        'Root=1-zzzzzzzz-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8',
+        'Root=bad;Parent=53995c3f42cd8ad8',
+        'Root=${TraceId.generate()};Parent=xyz',
+        'Root=;Parent=;Sampled=',
+        ';;=;',
+        '',
+      ];
+      for (final h in headers) {
+        String? sent;
+        final client = XRayBaseClient(
+          MockClient((req) async {
+            sent = req.headers['X-Amzn-Trace-Id'];
+            return http.Response('', 200);
+          }),
+          tracer,
+        );
+        await tracer.trace('op', () => client.get(Uri.parse('http://x/')),
+            traceHeader: h);
+        expect(sent,
+            matches(r'^Root=1-[0-9a-f]{8}-[0-9a-f]{24};Parent=[0-9a-f]{16};'),
+            reason: h);
+      }
     });
 
     test('subsegments and captureAsync nest inside the traced block', () async {

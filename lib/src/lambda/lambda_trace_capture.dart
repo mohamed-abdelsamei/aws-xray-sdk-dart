@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:http/http.dart' as http;
 
+import '../models/trace_header.dart' show validParentId;
 import '../models/trace_id.dart';
 // Imported for dartdoc references to [XRayTracer.run] / [XRayTracer.runLambda].
 import '../tracer.dart';
@@ -134,7 +135,7 @@ final class LambdaTraceCapture {
     final header = _slot.value;
     return LambdaTraceContext(
       traceId: TraceId.tryParse(header) ?? TraceId.generate(),
-      parentId: TraceId.parseParentId(header),
+      parentId: validParentId(header),
       sampled: TraceId.parseSampled(header) ?? true,
     );
   }

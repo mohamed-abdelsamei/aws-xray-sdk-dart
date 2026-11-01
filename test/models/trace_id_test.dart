@@ -23,6 +23,17 @@ void main() {
       expect(TraceId.tryParse('2-abc-def'), isNull);
     });
 
+    test('tryParse returns null for non-hex timestamp or random (AC10.1)', () {
+      // Right lengths, wrong alphabet: previously accepted, then tripped the
+      // buildTraceHeader assert downstream.
+      expect(
+          TraceId.tryParse('Root=1-zzzzzzzz-bd862e3fe1be46a994272793'), isNull);
+      expect(
+          TraceId.tryParse('Root=1-5759e988-bd862e3fe1be46a99427279g'), isNull);
+      expect(TraceId.tryParse('Root=1-5759e988-bd862e3fe1be46a994272793'),
+          isNotNull);
+    });
+
     test('tryParse roundtrips a generated ID', () {
       final id = TraceId.generate();
       final header = 'Root=$id;Parent=abc123;Sampled=1';

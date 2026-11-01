@@ -88,6 +88,44 @@ void main() {
       expect(seg['parent_id'], '1111aaaa2222bbbb');
     });
 
+    test('invalid Root drops Parent and starts a fresh trace (AC10.2)',
+        () async {
+      await serveAndCapture(
+        rate: 1.0,
+        requestTraceHeader: 'Root=bad;Parent=53995c3f42cd8ad8',
+      );
+
+      final seg = sender.last;
+      expect(seg['trace_id'], matches(r'^1-[0-9a-f]{8}-[0-9a-f]{24}$'));
+      expect(seg.containsKey('parent_id'), isFalse);
+    });
+
+    test('malformed Parent is omitted under a valid Root (AC10.3)', () async {
+      final upstreamTrace = TraceId.generate();
+      await serveAndCapture(
+        rate: 1.0,
+        requestTraceHeader: 'Root=$upstreamTrace;Parent=xyz;Sampled=1',
+      );
+
+      final seg = sender.last;
+      expect(seg['trace_id'], upstreamTrace.toString());
+      expect(seg.containsKey('parent_id'), isFalse);
+    });
+
+    test('non-hex Root does not throw AssertionError (AC10.4)', () async {
+      // The response trace header is built with asserts on; a non-hex Root
+      // that slipped through tryParse used to fail here.
+      final header = await serveAndCapture(
+        rate: 1.0,
+        requestTraceHeader:
+            'Root=1-zzzzzzzz-bd862e3fe1be46a994272793;Parent=zzzzzzzzzzzzzzzz',
+      );
+
+      expect(header, isNotNull);
+      expect(header, isNot(contains('zzzzzzzz')));
+      expect(sender.last.containsKey('parent_id'), isFalse);
+    });
+
     test('response header reuses the same root trace id', () async {
       final upstreamTrace = TraceId.generate();
       final header = await serveAndCapture(

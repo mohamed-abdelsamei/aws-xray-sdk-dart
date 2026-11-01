@@ -16,6 +16,12 @@
   `tcp:h:p udp:h:p` form in either order (the `udp:` address is used).
   Malformed values (bad or out-of-range port, empty host, `tcp:`-only) fall
   back to `127.0.0.1:2000` instead of producing a half-parsed address.
+- **Malformed incoming trace headers no longer leak into traces.**
+  `TraceId.tryParse` (and so `TraceId.parseRootString`) now requires hex in
+  the timestamp and random parts (non-hex ids were accepted and later failed an assert in debug builds).
+  `handleTraced`, `tracer.trace()` and `LambdaTraceCapture.context()` drop
+  `Parent` when the `Root` is invalid (a fresh trace is started) or the parent
+  is not 16 hex characters.
 
 ## 0.4.1
 

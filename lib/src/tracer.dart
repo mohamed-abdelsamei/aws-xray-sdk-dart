@@ -3,6 +3,7 @@ import 'dart:io';
 import 'models/http_data.dart';
 import 'models/segment.dart';
 import 'models/subsegment.dart';
+import 'models/trace_header.dart' show validParentId;
 import 'models/trace_id.dart';
 import 'sampling/fixed_rate_sampler.dart';
 import 'sampling/sampling_strategy.dart';
@@ -189,7 +190,7 @@ final class XRayTracer {
     final segment = Segment.begin(
       name: name,
       traceId: upstream ?? TraceId.generate(),
-      parentId: upstream == null ? null : TraceId.parseParentId(traceHeader!),
+      parentId: traceHeader == null ? null : validParentId(traceHeader),
       user: user,
     );
     return run(

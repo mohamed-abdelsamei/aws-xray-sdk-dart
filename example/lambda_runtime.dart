@@ -88,8 +88,10 @@ Future<Map<String, Object?>> handleInvocation(
   Map<String, Object?> event,
   String traceHeader,
 ) async {
-  final traceId = TraceId.tryParse(traceHeader) ?? TraceId.generate();
-  final parentId = TraceId.parseParentId(traceHeader);
+  final upstream = TraceId.tryParse(traceHeader);
+  final traceId = upstream ?? TraceId.generate();
+  // A Parent from an invalid Root belongs to no trace we continue; drop it.
+  final parentId = upstream == null ? null : TraceId.parseParentId(traceHeader);
   final sampled = TraceId.parseSampled(traceHeader) ?? true;
 
   return _tracer.runLambda(
