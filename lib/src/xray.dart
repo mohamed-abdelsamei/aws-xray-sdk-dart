@@ -6,9 +6,11 @@ import 'package:http/http.dart' as http;
 import 'http/xray_base_client.dart';
 import 'http/xray_http_overrides.dart';
 import 'lambda/lambda_trace_capture.dart';
+import 'diagnostic.dart';
 import 'models/segment.dart';
 import 'sampling/sampling_strategy.dart';
 import 'sender/daemon_address.dart';
+import 'sender/daemon_address_warning.dart';
 import 'tracer.dart';
 import 'wrappers/client_registry.dart';
 import 'wrappers/resource_extractor.dart';
@@ -129,15 +131,26 @@ abstract final class XRay {
   /// When [fromEnv] is true (the default) the standard AWS environment is read:
   ///  * `AWS_XRAY_DAEMON_ADDRESS` → daemon address (`host:port`, `[v6]:port`,
   ///    bare IPv6, or `tcp:… udp:…`, using the `udp:` part); malformed values
-  ///    fall back to `127.0.0.1:2000`;
+  ///    fall back to `127.0.0.1:2000` and are reported once, as a
+  ///    `daemon_address_invalid` diagnostic to [onDiagnostic] or, with no hook,
+  ///    as one line on `stderr` (the sanitized, shortened value is echoed;
+  ///    unset or empty values report nothing, and a closed `stderr` is
+  ///    ignored). It is reported once per install: a second call is a no-op,
+  ///    and [reset] then [configure] warns again;
   ///  * `AWS_LAMBDA_FUNCTION_NAME` → default service name.
   ///
   /// Explicit [serviceName], [sampling], or a fully built [tracer] override the
-  /// environment. Pass [patchDartIoHttp] = false to skip the global HTTP patch.
+  /// environment. [onSendError], [onSampledDrop] and [onDiagnostic] are passed
+  /// to the tracer built here (see [XRayTracer] for their contracts); like
+  /// [serviceName] and [sampling] they are ignored when [tracer] is supplied.
+  /// Pass [patchDartIoHttp] = false to skip the global HTTP patch.
   static XRayTracer configure({
     XRayTracer? tracer,
     String? serviceName,
     SamplingStrategy? sampling,
+    void Function(Segment segment, Object error)? onSendError,
+    void Function(Segment segment)? onSampledDrop,
+    void Function(XRayDiagnostic diagnostic)? onDiagnostic,
     bool fromEnv = true,
     bool patchDartIoHttp = true,
   }) {
@@ -146,6 +159,10 @@ abstract final class XRay {
 
     final env = fromEnv ? Platform.environment : const <String, String>{};
     final (host, port) = parseDaemonAddress(env['AWS_XRAY_DAEMON_ADDRESS']);
+    if (tracer == null) {
+      warnIfDaemonAddressInvalid(env['AWS_XRAY_DAEMON_ADDRESS'],
+          onDiagnostic: onDiagnostic);
+    }
     final name =
         serviceName ?? env['AWS_LAMBDA_FUNCTION_NAME'] ?? 'dart-service';
 
@@ -155,6 +172,9 @@ abstract final class XRay {
           sampling: sampling,
           daemonHost: host,
           daemonPort: port,
+          onSendError: onSendError,
+          onSampledDrop: onSampledDrop,
+          onDiagnostic: onDiagnostic,
         );
 
     defaultTracer = built;

@@ -527,4 +527,35 @@ void main() {
           NoopSender().sendPackets([utf8.encode('x')]), completes);
     });
   });
+
+  group('XRayTracer.runLambda — oversized handler node', () {
+    test('a 70 KB metadata value is trimmed, the result returned', () async {
+      final errors = <Object>[];
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) => errors.add(e),
+      );
+      final result = await t.runLambda(traceId, parentId, 'handler', () async {
+        t.addMetadata('body', 'x' * 70000);
+        t.addMetadata('note', 'kept');
+        return 42;
+      });
+
+      expect(result, 42);
+      expect(errors, isEmpty);
+      expect(sender.packets, isNotEmpty);
+      for (final p in sender.packets) {
+        expect(p.length, lessThanOrEqualTo(65507));
+      }
+      final doc = sender.docs.first;
+      expect(doc['type'], 'subsegment');
+      expect(doc['parent_id'], parentId);
+      final meta = doc['metadata'] as Map;
+      expect((meta['default'] as Map)['note'], 'kept');
+      expect((meta['default'] as Map)['body'], startsWith('[truncated: '));
+      expect((meta['xray'] as Map)['truncated'], isTrue);
+    });
+  });
 }

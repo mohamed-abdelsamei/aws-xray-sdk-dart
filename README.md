@@ -441,7 +441,8 @@ Lambda injects the daemon address via `AWS_XRAY_DAEMON_ADDRESS`. Do **not**
 hardcode `127.0.0.1:2000` — newer Lambda environments use a link-local address
 (`169.254.100.1:2000`). The recommended setup lets `XRay.configure()` read and
 parse it — including the `[v6]:port`, bare IPv6, and `tcp:… udp:…` forms; a
-malformed value falls back to `127.0.0.1:2000`:
+malformed value falls back to `127.0.0.1:2000` and is reported once (see
+[Diagnostics hook](#diagnostics-hook)):
 
 ```dart
 final tracer = XRay.configure(
@@ -626,6 +627,40 @@ appearing in the X-Ray console, work down this list:
 Delivery can only be confirmed at the daemon or the X-Ray console — not from
 inside the process.
 
+### Diagnostics hook
+
+Some problems are contained so tracing never breaks your app, and would
+otherwise leave no signal. Pass `onDiagnostic` to `XRayTracer` (or
+`XRay.configure`) to hear about them:
+
+```dart
+XRay.configure(
+  onDiagnostic: (d) => log.warning('xray ${d.code}: ${d.message}', d.error),
+  onSendError: (segment, error) => log.warning('xray send failed', error),
+);
+```
+
+`XRayDiagnostic.code` is a stable string, not an enum, so new codes can appear
+in any release. Codes in use: `daemon_address_invalid` (`XRay.configure` found a malformed
+`AWS_XRAY_DAEMON_ADDRESS` and fell back to `127.0.0.1:2000`; with no
+`onDiagnostic` it writes one line to `stderr` instead, and an unset or empty
+variable never reports; once per install), `node_trimmed` (a single segment or subsegment
+was too large for one datagram and its metadata was shortened or dropped) and
+`adapter_failed` (an adapter you registered for a Smithy client threw: the
+`requestAdapter`, its `withTraceHeader`, the resource extractor, the
+`responseAdapter` or the `errorStatus` hook; the call itself is unaffected and
+`error` is the object thrown at that step, which is usually your adapter's
+error. An error from the AWS call itself is yours and is never reported).
+`error` is the raw thrown object and is not redacted (unlike the emitted
+segment), so treat it as sensitive if your hook logs it.
+The hook is synchronous: it must not throw and must not be `async`. While
+any tracer's hook is running, diagnostics raised on the same call stack (by any
+tracer) are ignored. A custom sender that encodes outside its send call will not
+report `node_trimmed`. It can fire often, so
+rate-limit inside the callback. It does not receive send failures; those go to
+`onSendError`. `XRay.configure` also accepts `onSendError` and `onSampledDrop`;
+all three are ignored when you pass a prebuilt `tracer:`.
+
 ---
 
 ## Segment document schema
@@ -657,7 +692,13 @@ Key fields:
 
 Oversized segments (> 65507 bytes, the maximum IPv4 UDP payload) are
 automatically split into a skeleton segment plus one independent subsegment
-document per subsegment.
+document per subsegment. A single node that is still too large has its largest
+`metadata` values replaced with `[truncated: N bytes]` (and
+`metadata.xray.truncated` set) so the datagram fits; see
+`doc/tracing-behavior.md`. The service's behaviour on a trimmed document has
+not been verified end to end (a string now stands where a metadata map value
+was), and the exact service-side size limit (64000 vs 65536 bytes) is
+unconfirmed, so a trimmed document close to the limit may still be rejected.
 
 ---
 

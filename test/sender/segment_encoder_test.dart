@@ -55,6 +55,23 @@ void main() {
           as Map<String, Object?>;
     }
 
+    test('a leaf over the cap is trimmed so its packet fits', () {
+      final leaf = Subsegment.begin(name: 'leaf')
+          .addMetadata('body', 'x' * 70000)
+          .close();
+      final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
+          .addSubsegment(leaf)
+          .close();
+      final payloads = enc.encode(segment);
+      expect(payloads.length, greaterThan(1));
+      for (final p in payloads) {
+        expect(p.length, lessThanOrEqualTo(65507));
+      }
+      final doc = bodyOf(payloads.last);
+      expect(doc['id'], leaf.id);
+      expect(((doc['metadata'] as Map)['xray'] as Map)['truncated'], isTrue);
+    });
+
     test('split emits a skeleton segment plus independent subsegment docs', () {
       var segment = Segment.begin(name: 'svc', traceId: TraceId.generate());
       for (var i = 0; i < 200; i++) {

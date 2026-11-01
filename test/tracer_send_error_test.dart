@@ -278,4 +278,43 @@ void _zeroByteSendTests() {
     expect(sockets[1].delivered, 1);
     expect(reports, hasLength(1));
   });
+
+  test('every datagram refused: onSendError once per segment, runs return',
+      () async {
+    final sockets = <_ZeroSendSocket>[];
+    final reports = <_Report>[];
+    final tracer = newTracerWithUdpSeamsForTesting(
+      serviceName: 'svc',
+      sampling: FixedRateSampler(1.0),
+      socketFactory: (_) async {
+        final s = _ZeroSendSocket(refuse: true);
+        sockets.add(s);
+        return s;
+      },
+      onSendError: (s, e) => reports.add((segment: s, error: e)),
+    );
+    final big = 'x' * 40000;
+    final segments = [for (var i = 0; i < 3; i++) tracer.beginSegment()];
+
+    for (final segment in segments) {
+      final result = await tracer.run(segment, () async {
+        // Large enough that the segment is split into several datagrams.
+        await tracer.captureAsync('a', (span) async {
+          span.addMetadata('blob', big);
+        });
+        await tracer.captureAsync('b', (span) async {
+          span.addMetadata('blob', big);
+        });
+        return 1;
+      }).timeout(const Duration(seconds: 5));
+      expect(result, 1);
+    }
+
+    expect(reports.map((r) => r.segment.id), segments.map((s) => s.id));
+    expect(reports.every((r) => r.error is SocketException), isTrue);
+    expect(sockets.length, greaterThan(segments.length),
+        reason: 'each refused datagram forces a rebind');
+    expect(sockets.every((s) => s.closed), isTrue);
+    expect(sockets.every((s) => s.delivered == 0), isTrue);
+  });
 }

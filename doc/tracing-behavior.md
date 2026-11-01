@@ -122,6 +122,16 @@ When the SDK injects `X-Amzn-Trace-Id`, the emitted subsegment records:
   If a `?` or `#` comes before an `@`, that `@` may be part of a query: only a
   valid `host[:port]` before the `?` or `#` is kept, the rest is dropped.
   Before 0.5.0 the full URL, query string included, was recorded.
+- `aws.queue_url` and every `aws.resource_names` entry share one redaction
+  when the document is emitted: the whole value is redacted like a URL, then
+  every URL found in what is left (several URLs, or text around one) loses
+  userinfo, query and fragment. Values containing no scheme-style `:/` or
+  `:\` are left as they are (table and bucket names, ARNs) unless the entry equals `queue_url`, and a
+  plain queue URL is unchanged. A hand-built `AwsData` whose `resource_names` holds a
+  credentialed string with no scheme (`user:pw@host/path`) or a protocol-relative
+  `//user:pw@host/path` that is not the
+  `queue_url` is not redacted; the built-in producers never create one. The
+  in-memory `AwsData` keeps raw values. The other `aws` fields are recorded as given.
 - URLs inside `cause.exceptions[].message` are redacted with the same rule
   before the message is capped at 1024 characters, so a URL cut by the cap
   cannot leave part of a password behind. This covers messages from caught
@@ -414,10 +424,73 @@ flowchart TD
 - UDP has no delivery acknowledgment. `UdpSender.onError` reports local
   resolve/bind/send failures only, not daemon receipt.
 
-Known encoding boundary: the current encoder splits large segments with multiple
-subsegments, but it does not truncate a single oversized subsegment document.
-Keep individual subsegment metadata/cause payloads well below the 65507-byte UDP
-datagram limit.
+Oversized single nodes: a node that cannot be split further (a leaf
+subsegment, or a segment/subsegment whose own payload is still over 65507 bytes
+without its children) is trimmed so its datagram fits. First, the largest
+`metadata` values are replaced with the string `[truncated: N bytes]` (N is the
+value's encoded JSON size), just as many as needed, and
+`metadata.xray.truncated` is set to `true`. A value that is not longer than its
+marker is never replaced. If that is not enough (for example a huge annotation
+or name), the node is reduced to its small structural fields (ids, times,
+status flags, `name` cut to 200 UTF-16 code units) plus the marker; `user`,
+`origin`, `http`, `aws`, `cause` and `annotations` are dropped. The recorded
+model is never changed, and a node that already fits is sent unchanged.
+
+The encoder's output fits the datagram (assuming normal-length ids; packets given directly to `sendPackets` are not checked), but it does not guarantee the X-Ray service
+accepts or samples the trimmed document. The service's behaviour on a trimmed
+document has not been verified end to end (a string now stands where a metadata
+map value was), and the exact service-side size limit (64000 vs 65536 bytes) is
+unconfirmed, so a trimmed document close to the limit may still be rejected.
+Metadata is not indexed, so the
+marker cannot be used as a filter in X-Ray. Code that reads the document back
+will see a string where a metadata value used to be. The macOS local limit
+(9216 bytes by default) is separate and still applies in local development.
+
+## Diagnostics Hook
+
+`XRayTracer(onDiagnostic:)` (also accepted by `XRay.configure`) receives an
+`XRayDiagnostic` for contained, non-segment problems. The fields are `code`,
+`message`, and, when there is a failure, `error` and `stackTrace`. Only the SDK
+creates diagnostics. Codes are stable strings, not an enum, and new ones may be
+added in any release.
+
+- `node_trimmed`: the encoder shortened a node's metadata or reduced it to a
+  bare node (see "Oversized single nodes"). It is reported on both the `run()`
+  and `runLambda()` paths, through senders that encode (`UdpSender`). A node
+  that fits produces nothing.
+- `adapter_failed`: code you registered for a Smithy client threw. The sites
+  are the `requestAdapter` (the call is sent untraced), `withTraceHeader` (sent
+  without the trace header), the resource extractor (no resource data), the
+  `responseAdapter` (subsegment closed without response data) and the
+  `errorStatus` hook (error classified without a status), plus the last-resort
+  fallbacks when recording the outcome itself fails. `error` and `stackTrace`
+  describe the object thrown at that step, which is usually the adapter's own
+  error (the response-adapter step also covers the SDK's enrichment after it).
+  `error` is the raw thrown object and is not redacted, unlike the emitted
+  segment, so a hook that logs it should treat it as sensitive. The call result, or the original error, is unchanged. An
+  error thrown by the AWS call itself is the app's and is not reported.
+  `XRayBaseClient` enrichment failures are not reported.
+- The hook is synchronous and best-effort. A throwing callback is ignored, and
+  so is the late failure of an `async` callback (hooks should still be
+  synchronous). While any tracer's hook is running, a diagnostic raised on the
+  same call stack (by any tracer) is ignored. A custom sender that encodes outside its send call (in a
+  different zone) will not report `node_trimmed`.
+- `daemon_address_invalid`: `XRay.configure` found `AWS_XRAY_DAEMON_ADDRESS`
+  set but malformed and fell back to `127.0.0.1:2000`. The message includes
+  the value, sanitized (URLs redacted, control and format characters replaced,
+  so it is one line) and shortened to about 100 characters. Scheme-less
+  userinfo (`user:pw@host:badport`) is not recognised as a URL and is not
+  masked. A TCP-only value such as `tcp:127.0.0.1:2000` counts as malformed
+  (the SDK sends over UDP), so Lambda users with such a value will see the
+  line after upgrading. It is emitted once per install: a second `configure`
+  is a no-op, and `XRay.reset()` followed by `configure` warns again. It is
+  emitted only when `configure` builds the tracer itself (not with a prebuilt
+  `tracer:`); an unset or empty variable never reports. With no `onDiagnostic`
+  callback, `configure` writes one line to `stderr` instead (a closed `stderr`
+  is ignored). This is the only such line that fires at configure time.
+- Send failures are not diagnostics; they go to `onSendError` only.
+- Apart from the malformed daemon address above, nothing is printed when no
+  callback is set.
 
 ## Supported Runtimes And Scope
 

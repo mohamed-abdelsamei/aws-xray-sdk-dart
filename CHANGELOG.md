@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- **`onDiagnostic` hook and `XRayDiagnostic`.** `XRayTracer(onDiagnostic:)`
+  receives an `XRayDiagnostic` for contained problems that used to leave no
+  signal. It carries `code`, `message`, and, when there is a failure, `error`
+  and `stackTrace`. `code` is an open string rather than an enum, so new codes
+  can appear in any release; only the SDK creates diagnostics (no public
+  constructor). Codes in this release:
+  - `node_trimmed`: a single oversized segment or subsegment was trimmed to fit
+    the datagram (see "Oversized single nodes are trimmed" under Fixed). Reported only through senders that encode in
+    their send call, such as `UdpSender`.
+  - `adapter_failed`: code you registered for a Smithy client threw and was
+    contained: the `requestAdapter`, its `withTraceHeader` injection, the
+    resource extractor, the `responseAdapter`, or the `errorStatus` hook. The
+    call result, or the original error, is unchanged. An error thrown by the
+    AWS call itself is yours and is never reported.
+  - `daemon_address_invalid`: see Changed below.
+
+  The hook is synchronous and best-effort: a callback that throws is ignored,
+  an `async` callback's late failure is swallowed, and while any tracer's hook
+  is running, diagnostics raised on the same call stack are ignored. Send
+  failures are not diagnostics; they stay on `onSendError`. Known limits:
+  `XRayBaseClient` enrichment failures are not reported through the hook, and
+  the reported `error` is the raw thrown object, not redacted like the emitted
+  segment, so treat it as sensitive if your hook logs it.
+- **`XRay.configure` accepts `onSendError`, `onSampledDrop` and
+  `onDiagnostic`**, passed to the tracer it builds. Like `serviceName` and
+  `sampling`, they are ignored when you supply `tracer:`.
+
+### Changed
+
+- **Behaviour change — a malformed `AWS_XRAY_DAEMON_ADDRESS` is now reported.**
+  `XRay.configure` used to fall back to `127.0.0.1:2000` with no signal. It now
+  reports once per install: as a `daemon_address_invalid` diagnostic when you
+  pass `onDiagnostic`, otherwise as one line on `stderr` (the value is
+  sanitized: URLs redacted, control and format characters replaced, shortened
+  to about 100 characters; scheme-less userinfo such as `user:pw@host:badport`
+  is not masked). A TCP-only value such as `tcp:127.0.0.1:2000` counts as
+  malformed, so Lambda users with such a value will see the line after
+  upgrading. A second `configure` is a no-op; `XRay.reset()` then
+  `configure` reports again. Unset or empty values never report, and nothing
+  is reported when you supply `tracer:`. The fallback itself is unchanged.
+  This is the only such line that fires at configure time.
+- **Behaviour change — `aws.queue_url` and `aws.resource_names` are redacted
+  like `http.request.url`.** The emitted document drops userinfo, query
+  strings, and fragments from `aws.queue_url` and from every
+  `aws.resource_names` entry (including URLs embedded in a longer entry), so
+  an SQS queue URL carrying credentials or a signature no longer reaches
+  X-Ray. Table and bucket names, ARNs, and plain queue URLs are unchanged. The
+  in-memory `AwsData` keeps raw values. Accepted limit: a hand-built `AwsData`
+  whose `resource_names` holds scheme-less credentials (`user:pw@host/path`)
+  or a protocol-relative `//user:pw@host/path` form that differs from
+  `queue_url` is not redacted; the built-in producers never
+  create one.
+
+### Fixed
+
+- **Oversized single nodes are trimmed instead of sent whole.** A segment or
+  subsegment too big on its own (for example a huge `metadata` value) could
+  not be split, so it was sent as-is and the OS refused the datagram. The
+  encoder now trims it to fit the 65507-byte datagram: the largest `metadata`
+  values become the string `[truncated: N bytes]` (only as many as needed,
+  and only when the marker is shorter) and `metadata.xray.truncated` is set to
+  `true`; if that is not enough, the node is reduced to its ids, timing,
+  flags, and `name` (capped at 200 UTF-16 code units); `http`, `aws`, `cause`
+  and `user` data is dropped in that case. Nodes that already fit
+  are byte-for-byte unchanged.
+  **Behaviour change:** an emitted document can now differ from the recorded
+  one, and a string can appear where a `metadata` map value used to be. The
+  fix guarantees the packet fits the datagram, not that the X-Ray service
+  accepts it. The service's behaviour on a trimmed document has not been
+  verified end to end (a string now stands where a metadata map value was),
+  and the exact service-side size limit (64000 vs 65536 bytes) is unconfirmed,
+  so a trimmed document close to the limit may still be rejected by the
+  service. Ids passed directly to `runLambda` are not capped, so a huge id
+  can still exceed the limit.
+
 ## 0.5.0
 
 ### Added

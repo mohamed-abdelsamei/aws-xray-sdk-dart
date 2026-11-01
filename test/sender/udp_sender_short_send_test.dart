@@ -98,6 +98,34 @@ void main() {
       await sender.close();
     });
 
+    test(
+        'every send refused: one report, rebind and close per packet, and '
+        'the batch terminates', () async {
+      const n = 5;
+      final sockets = <_FakeSocket>[];
+      final errors = <Object>[];
+      final sender = UdpSender(
+        onError: errors.add,
+        socketFactory: (_) async {
+          final s = _FakeSocket(); // refuses every send
+          sockets.add(s);
+          return s;
+        },
+      );
+
+      await sender.sendPackets([
+        for (var i = 0; i < n; i++) [i],
+      ]).timeout(const Duration(seconds: 5));
+
+      expect(errors, hasLength(n));
+      expect(sockets, hasLength(n));
+      expect(sockets.every((s) => s.closed), isTrue);
+      expect(sockets.every((s) => s.attempts == 1), isTrue,
+          reason: 'a refused datagram is dropped, not retried');
+      expect(sockets.expand((s) => s.sent), isEmpty);
+      await sender.close();
+    });
+
     test('concurrent senders share the rebind; none uses a closed socket',
         () async {
       final sockets = <_FakeSocket>[];

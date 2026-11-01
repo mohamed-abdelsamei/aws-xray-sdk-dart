@@ -23,7 +23,9 @@
 library;
 
 // Core
-export 'src/tracer.dart' hide newTracerWithUdpSeamsForTesting;
+export 'src/diagnostic.dart'
+    hide createDiagnostic, deliverDiagnostic, safeNotify;
+export 'src/tracer.dart' hide newTracerWithUdpSeamsForTesting, reportDiagnostic;
 export 'src/xray.dart';
 
 // Models

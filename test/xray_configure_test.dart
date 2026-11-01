@@ -423,6 +423,62 @@ void main() {
       expect(result, 7); // no-op tracer: fn still runs, nothing is sent
     });
   });
+
+  group('XRay.configure hook passthroughs', () {
+    test('onSendError reaches the tracer it builds', () async {
+      final errors = <Object>[];
+      final t = XRay.configure(
+        fromEnv: false,
+        patchDartIoHttp: false,
+        sampling: FixedRateSampler(1),
+        onSendError: (_, e) => errors.add(e),
+      );
+      final cyclic = <String, Object>{};
+      cyclic['self'] = cyclic;
+      await t.run(Segment.begin(name: 'svc', traceId: TraceId.generate()),
+          () async {
+        t.addMetadata('loop', cyclic);
+      });
+      expect(errors, hasLength(1));
+    });
+
+    test('onSampledDrop reaches the tracer it builds', () async {
+      final dropped = <Segment>[];
+      final t = XRay.configure(
+        fromEnv: false,
+        patchDartIoHttp: false,
+        sampling: FixedRateSampler(0),
+        onSampledDrop: dropped.add,
+      );
+      await t.run(
+          Segment.begin(name: 'svc', traceId: TraceId.generate()), () async {});
+      expect(dropped, hasLength(1));
+    });
+
+    test('onDiagnostic reaches the tracer it builds', () {
+      final t = XRay.configure(
+        fromEnv: false,
+        patchDartIoHttp: false,
+        onDiagnostic: (_) {},
+      );
+      expect(t.onDiagnostic, isNotNull);
+    });
+
+    test('the hooks are ignored when tracer: is supplied', () {
+      final mine = XRayTracer(serviceName: 'svc', sender: _RecordingSender());
+      final t = XRay.configure(
+        tracer: mine,
+        patchDartIoHttp: false,
+        onSendError: (_, __) {},
+        onSampledDrop: (_) {},
+        onDiagnostic: (_) {},
+      );
+      expect(identical(t, mine), isTrue);
+      expect(t.onSendError, isNull);
+      expect(t.onSampledDrop, isNull);
+      expect(t.onDiagnostic, isNull);
+    });
+  });
 }
 
 // Strips the X-Ray header line from a UDP payload and decodes the JSON body.

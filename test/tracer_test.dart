@@ -713,6 +713,36 @@ void main() {
       expect(captured, isA<StateError>());
     });
 
+    test('an async onSendError that fails after an await is swallowed',
+        () async {
+      final t = XRayTracer(
+        serviceName: 'svc',
+        sender: _ThrowingSender(),
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) async {
+          await Future<void>.delayed(Duration.zero);
+          throw Exception('late hook failure');
+        },
+      );
+      await expectLater(t.run(t.beginSegment(), () async => 7), completion(7));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    });
+
+    test('an async onSampledDrop that fails after an await is swallowed',
+        () async {
+      final t = XRayTracer(
+        serviceName: 'svc',
+        sender: sender,
+        sampling: FixedRateSampler(0.0),
+        onSampledDrop: (_) async {
+          await Future<void>.delayed(Duration.zero);
+          throw Exception('late hook failure');
+        },
+      );
+      await expectLater(t.run(t.beginSegment(), () async => 7), completion(7));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    });
+
     test('a throwing hook never faults the traced operation', () async {
       final t = XRayTracer(
         serviceName: 'svc',
