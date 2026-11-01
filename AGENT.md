@@ -55,7 +55,7 @@ lib/
   src/
     tracer.dart              # XRayTracer — Zone context, trace(), run(), runLambda(), captureAsync(), annotate(), subsegment API
     xray.dart                # XRay facade — trace(), capture(), patchHttp(), fromClient<T>(), untracedHttpClient()
-    utils.dart               # randomHex(), nowSeconds()
+    utils.dart               # randomHex(), nowSeconds(), truncateMessage() (1024-char cap)
     context/
       trace_scope.dart       # TraceScope / TraceContext — live mutable entity tree, serialized at close
       trace_suppression.dart # runWithoutDartIoTracing() — prevents double-tracing under patchHttp
@@ -63,9 +63,9 @@ lib/
       segment.dart           # Segment (immutable value object)
       subsegment.dart        # Subsegment (immutable value object)
       trace_id.dart          # TraceId — generate, tryParse, parseParentId, parseSampled
-      trace_header.dart      # X-Amzn-Trace-Id formatter
+      trace_header.dart      # buildTraceHeader(), validParentId() — header build + hex validation
       cause.dart             # Cause + XRayException
-      http_data.dart         # HttpData, HttpRequestData, HttpResponseData
+      http_data.dart         # HttpData, HttpRequestData, HttpResponseData, redactUrl()
       aws_data.dart          # AwsData — operation, tableName, bucketName, …
       annotation.dart        # annotation key/value sanitize + coerce helpers
     sampling/
@@ -73,11 +73,12 @@ lib/
       fixed_rate_sampler.dart
       reservoir_sampler.dart  # injectable clock for deterministic tests
     sender/
-      sender.dart            # Sender abstract class (send, close, sendPackets)
+      sender.dart            # Sender abstract class (send, close, sendPackets — default throws)
       udp_sender.dart        # UdpSender — fire-and-forget UDP, resolve/bind once, onError hook
+      daemon_address.dart    # parseDaemonAddress() — AWS_XRAY_DAEMON_ADDRESS, all formats
       noop_sender.dart       # NoopSender — discards all (local dev)
       in_memory_sender.dart  # InMemorySender — records segments + packets for test assertions
-      segment_encoder.dart   # encode(), encodeSubsegmentDoc() — 64 KB split logic
+      segment_encoder.dart   # encode(), encodeSubsegmentDoc() — 65507-byte split logic
     http/
       xray_http_client.dart  # XRayHttpClient — wraps dart:io HttpClient
       xray_http_overrides.dart # XRayHttpOverrides — global dart:io patch
@@ -166,9 +167,32 @@ set keeps a late body-stream close after a sweep from double-attaching.
 
 ### Segment size limit
 
-UDP datagrams are capped at 64 KB. `SegmentEncoder.encode()` splits
-oversized segments into a skeleton segment + one independent subsegment
-document per child subsegment.
+A UDP datagram over IPv4 carries at most **65507 bytes** (65535 − 8 UDP header
+− 20 IP header). `encode()` splits an oversized segment into a skeleton segment
+plus independent subsegment documents, recursing into nested children; the
+Lambda path (`encodeSubsegmentDoc()`) splits the same way. A single node that is
+over the cap on its own is still sent whole (known gap).
+
+### Redaction at serialization
+
+The in-memory models keep raw values; redaction happens when JSON is emitted,
+at one choke point per field, never per call site:
+
+- `HttpRequestData.toJson()` passes every URL through `redactUrl()`
+  (`http_data.dart`): userinfo, query string and fragment are stripped, leaving
+  `scheme://host[:port]/path`. Not configurable.
+- `XRayException.from()` guards `toString()` (a throwing `toString()` falls
+  back to the type name), then strips every URL inside the message with
+  `redactUrlsInText()` (`http_data.dart`), then caps it at 1024 UTF-16 code
+  units plus `…[truncated]` via `truncateMessage()`. Redaction must precede
+  the cap, or a URL cut inside its userinfo leaks part of the password. AWS
+  error-body messages in `XRayBaseClient` take the same path, and
+  `XRayException.toJson()` redacts again (idempotent, no cap) so user-built
+  exceptions are covered. Known gaps are listed in `doc/tracing-behavior.md`.
+
+When changing a sanitizer, test it with hostile input (separators inside the
+secret, backslashes, leading whitespace/control characters), not just
+well-formed URLs.
 
 ---
 
@@ -179,9 +203,11 @@ document per child subsegment.
 | **UDP-first** | Fire-and-forget; no ACK, no retry. PutTraceSegments HTTP API delivery is not shipped until SigV4 signing is implemented. |
 | **Immutable models** | `Segment` / `Subsegment` are value objects; every mutation returns a copy. No shared-state races. |
 | **Sampling at entry** | `shouldSample()` called once at `run()` entry; result stored in Zone and read by `closeSegment()` and every tracing path (HTTP clients, server middleware, Smithy interceptor) for header injection. Prevents orphaned child traces. |
-| **Tracing never faults the app** | Sender / serialization failures during finalization are swallowed in `run` / `runLambda` / `closeSegment` / `close`. `UdpSender.onError` surfaces local failures without throwing. |
+| **Tracing never faults the app** | User adapters, `toString()`, `toJson()` and the sender are all guarded; a failure in instrumentation never replaces the app's result or exception (the original error is rethrown unchanged). Sender / encode failures during finalization are contained and reported to `XRayTracer(onSendError:)` — including transport errors from the tracer-built `UdpSender` and `runLambda` encode failures. |
 | **No `dart:mirrors`** | AOT-safe; compiles with `dart compile exe`. No `build_runner` step. Uses `dart:io`, so not Flutter-web compatible. |
-| **`abstract class Sender`** | Not `abstract interface class`: a concrete `sendPackets()` default lives here so sub-classes don't break. |
+| **`abstract class Sender`** | Not `abstract interface class`: `sendPackets()` has a concrete default so sub-classes compile, but it throws `UnsupportedError` — a custom sender used with `runLambda()` must override it. The tracer reports the failure via `onSendError`. `NoopSender`, `InMemorySender`, `UdpSender` override it. |
+| **Untrusted trace headers** | Incoming `X-Amzn-Trace-Id` values are validated (hex IDs, `validParentId()`); a malformed header starts a fresh trace instead of linking to a bogus parent. |
+| **Test seams hidden** | Internal helpers that tests import directly (`redactUrl`, `redactUrlsInText`, `newTracerWithUdpSeamsForTesting`) are excluded with `hide` in the barrel. Keep new seams out of the public API the same way. |
 
 ---
 
@@ -195,7 +221,8 @@ e.g. 1-5759e988-bd862e3fe1be46a994272793
 `TraceId.generate()` — creates new ID  
 `TraceId.tryParse(header)` — parses `Root=…;Parent=…;Sampled=…`  
 `TraceId.parseParentId(header)` — extracts `Parent=` field  
-`TraceId.parseSampled(header)` — extracts `Sampled=` as `bool?`
+`TraceId.parseSampled(header)` — extracts `Sampled=` as `bool?`  
+`validParentId(header)` (`trace_header.dart`) — `Parent=` only when it and `Root` are valid hex, else `null`
 
 ---
 
@@ -296,12 +323,15 @@ publish, dispatch **Publish to pub.dev** on the existing tag.
 - `pubspec.lock` is gitignored (library, not an app).
 - One runtime dependency: `http` (for `XRayBaseClient`); otherwise only `dart:io` / `dart:convert` / `dart:async`.
 - Release tags come only from the manual **Release** workflow (or a hand-pushed `git tag`); nothing tags or publishes on merges to `main`.
+- PR titles and commits are Conventional Commits with a **lowercase subject** (enforced by `commitlint.yml`); use `fix!:` / `feat!:` for behaviour changes.
+- `feat` / `fix` / `perf` / breaking changes get a `CHANGELOG.md` entry under a `## X.Y.Z` heading — never `## Unreleased`, which the release workflow does not recognise.
+- Don't bump `pubspec.yaml`'s version; the Release workflow does it.
 
 ---
 
 ## Testing
 
-`test/` mirrors `lib/src/` (26 test files). Common patterns when adding tests:
+`test/` mirrors `lib/src/` (30 test files). Common patterns when adding tests:
 
 - **Assert on emitted output with `InMemorySender`.** Build the tracer with one,
   exercise the code, then inspect `sender.segments` (closed `Segment`s, the
