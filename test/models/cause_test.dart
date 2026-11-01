@@ -1,7 +1,49 @@
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 import 'package:test/test.dart';
 
+class _ThrowingToString {
+  @override
+  String toString() => throw StateError('toString exploded');
+}
+
+class _LongError {
+  _LongError(this.text);
+  final String text;
+  @override
+  String toString() => text;
+}
+
+const _marker = '…[truncated]';
+
 void main() {
+  group('XRayException.from hardening', () {
+    test('AC3.3: message over 1024 chars is truncated with marker', () {
+      final e = XRayException.from(_LongError('x' * 5000));
+      expect(e.message.length, 1024 + _marker.length);
+      expect(e.message, endsWith(_marker));
+      expect(e.message, startsWith('x' * 1024));
+    });
+
+    test('AC3.3: message of exactly 1024 chars is unchanged', () {
+      final e = XRayException.from(_LongError('y' * 1024));
+      expect(e.message, 'y' * 1024);
+    });
+
+    test('AC3.3: truncation does not split a surrogate pair', () {
+      // 1023 ASCII chars, then an emoji (2 code units) straddling the cap.
+      final e = XRayException.from(_LongError('a' * 1023 + '😀' * 10));
+      expect(e.message, 'a' * 1023 + _marker);
+    });
+
+    test('AC3.4: throwing toString falls back to the runtime type name', () {
+      late XRayException e;
+      expect(
+          () => e = XRayException.from(_ThrowingToString()), returnsNormally);
+      expect(e.type, '_ThrowingToString');
+      expect(e.message, '_ThrowingToString');
+    });
+  });
+
   group('XRayException', () {
     test('from() captures runtimeType and message', () {
       final e = XRayException.from(FormatException('bad input'));

@@ -22,11 +22,38 @@ final class XRayException {
     this.remote = false,
   });
 
-  factory XRayException.from(Object error) => XRayException(
-        id: randomHex(16),
-        type: error.runtimeType.toString(),
-        message: error.toString(),
-      );
+  /// Builds an entry from a caught [error]. Never throws: if the error's
+  /// `toString()` throws, the message falls back to the runtime type name.
+  /// Messages longer than 1024 UTF-16 code units are truncated
+  /// and end with `…[truncated]` (ADR 0001).
+  factory XRayException.from(Object error) {
+    final type = _safeType(error);
+    return XRayException(
+      id: randomHex(16),
+      type: type,
+      message: _safeMessage(error, type),
+    );
+  }
+
+  static String _safeType(Object error) {
+    try {
+      return error.runtimeType.toString();
+    } catch (_) {
+      return 'Object';
+    }
+  }
+
+  /// The single place an error becomes a recorded message: guard, then (a
+  /// future redaction step goes here, before truncation) truncate.
+  static String _safeMessage(Object error, String fallback) {
+    String raw;
+    try {
+      raw = error.toString();
+    } catch (_) {
+      raw = fallback;
+    }
+    return truncateMessage(raw);
+  }
 
   final String id;
   final String type;

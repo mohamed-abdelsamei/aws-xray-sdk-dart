@@ -129,9 +129,12 @@ final class XRayInterceptor<Req, Res> {
           response = await runWithoutDartIoTracing(() => inner(tracedRequest));
         } catch (e) {
           try {
+            // Guarded: a throwing toString()/runtimeType must not drop the
+            // status, throttle flag, or cause.
+            final ex = XRayException.from(e);
             final status = _statusOf(e);
-            final isThrottle = isThrottleErrorCode(e.runtimeType.toString()) ||
-                isThrottleErrorCode(e.toString());
+            final isThrottle =
+                isThrottleErrorCode(ex.type) || isThrottleErrorCode(ex.message);
             final failed = sub.withHttp(requestOnly).withAws(awsData);
             if (status != null) {
               var classified = failed
@@ -141,13 +144,11 @@ final class XRayInterceptor<Req, Res> {
                   ))
                   .applyStatus(status);
               if (isThrottle) classified = classified.withThrottle();
-              _tracer.endSubsegment(classified.withCause(Cause(
-                exceptions: [XRayException.from(e)],
-              )));
+              _tracer
+                  .endSubsegment(classified.withCause(Cause(exceptions: [ex])));
             } else if (isThrottle) {
-              _tracer.endSubsegment(failed.withThrottle().withCause(Cause(
-                    exceptions: [XRayException.from(e)],
-                  )));
+              _tracer.endSubsegment(
+                  failed.withThrottle().withCause(Cause(exceptions: [ex])));
             } else {
               _tracer.failSubsegment(failed, e);
             }

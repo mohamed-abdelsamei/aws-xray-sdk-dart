@@ -11,6 +11,7 @@ import '../models/http_data.dart';
 import '../models/trace_header.dart';
 import '../context/trace_suppression.dart';
 import '../tracer.dart';
+import '../utils.dart';
 
 /// Wraps [http.Client] to trace every outbound HTTP request through
 /// `package:http`.
@@ -410,7 +411,7 @@ final class XRayBaseClient extends http.BaseClient {
         XRayException(
           id: _exceptionId(),
           type: type,
-          message: message,
+          message: truncateMessage(message),
           remote: true,
         ),
       ]),

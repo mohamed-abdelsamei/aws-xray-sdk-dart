@@ -30,6 +30,11 @@
 
 ### Fixed
 
+- **Exception messages are capped and never throw.** `XRayException.from`
+  truncates messages over 1024 UTF-16 code units and appends `…[truncated]`
+  (without splitting a surrogate pair). If an error's `toString()` throws, the
+  message falls back to its runtime type name; previously that dropped the
+  whole segment when the error escaped `tracer.run`.
 - **`onSendError` now fires for transport failures.** The `UdpSender` the
   tracer builds itself (no `sender` argument) swallowed resolve, bind, and
   datagram-send errors, so `onSendError` only ever saw encode errors. It now

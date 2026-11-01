@@ -363,6 +363,29 @@ void main() {
       expect((sub['aws'] as Map)['table_name'], 'missing');
     });
 
+    test('aws error message over 1024 chars is truncated with marker',
+        () async {
+      final inner = _MockClient(
+        400,
+        body: jsonEncode({
+          '__type': 'com.amazonaws#ValidationException',
+          'message': 'm' * 5000,
+        }),
+      );
+      final client = XRayBaseClient(inner, tracer);
+
+      await tracer.run(tracer.beginSegment(), () async {
+        await client.post(
+          Uri.parse('https://dynamodb.us-east-1.amazonaws.com/'),
+          headers: {'X-Amz-Target': 'DynamoDB_20120810.GetItem'},
+        );
+      });
+
+      final sub = sender.lastSubs.first as Map;
+      final exc = ((sub['cause'] as Map)['exceptions'] as List).first as Map;
+      expect(exc['message'], '${'m' * 1024}…[truncated]');
+    });
+
     test('aws throttle error code marks non-429 response as throttled',
         () async {
       final inner = _MockClient(

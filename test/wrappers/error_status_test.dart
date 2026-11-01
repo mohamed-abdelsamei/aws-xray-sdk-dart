@@ -32,7 +32,18 @@ SmithyResponseAdapter<Object> _res(Object _) => (
       errorCode: null,
     );
 
-int? _statusHook(Object e) => e is _HttpError ? e.status : null;
+/// An error whose `toString()` throws; [_statusHook] still maps it to 429.
+final class _ThrowingToString implements Exception {
+  const _ThrowingToString();
+  @override
+  String toString() => throw StateError('toString exploded');
+}
+
+int? _statusHook(Object e) => e is _ThrowingToString
+    ? 429
+    : e is _HttpError
+        ? e.status
+        : null;
 
 void main() {
   late InMemorySender sender;
@@ -78,6 +89,18 @@ void main() {
       ((sub['http'] as Map?)?['response'] as Map?)?['status'];
 
   group('errorStatus hook', () {
+    test('a throwing toString keeps status, throttle and cause', () async {
+      final sub =
+          await failWith(const _ThrowingToString(), errorStatus: _statusHook);
+      expect(sub['error'], isTrue);
+      expect(sub['throttle'], isTrue);
+      expect(sub.containsKey('fault'), isFalse);
+      expect(status(sub), 429);
+      final exc = ((sub['cause'] as Map)['exceptions'] as List).single as Map;
+      expect(exc['type'], '_ThrowingToString');
+      expect(exc['message'], '_ThrowingToString');
+    });
+
     test('AC7.1: 400 records error, no fault, http.response.status', () async {
       final sub =
           await failWith(const _HttpError(400), errorStatus: _statusHook);
