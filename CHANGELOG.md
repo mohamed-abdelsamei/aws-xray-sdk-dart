@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.1
+
+### Changed
+
+- **Behaviour change — `aws.queue_url` and `aws.resource_names` are redacted
+  like `http.request.url`.** The emitted document drops userinfo, query
+  strings, and fragments from `aws.queue_url` and from every
+  `aws.resource_names` entry (including URLs embedded in a longer entry), so
+  an SQS queue URL carrying credentials or a signature no longer reaches
+  X-Ray. Table and bucket names, ARNs, and plain queue URLs are unchanged. The
+  in-memory `AwsData` keeps raw values. Accepted limit: a hand-built `AwsData`
+  whose `resource_names` holds scheme-less credentials (`user:pw@host/path`)
+  that differ from `queue_url` is not redacted; the built-in producers never
+  create one.
+
+### Fixed
+
+- **Oversized single nodes are trimmed instead of sent whole.** A segment or
+  subsegment too big on its own (for example a huge `metadata` value) could
+  not be split, so it was sent as-is and the OS refused the datagram. The
+  encoder now trims it to fit the 65507-byte datagram: the largest `metadata`
+  values become the string `[truncated: N bytes]` (only as many as needed,
+  and only when the marker is shorter) and `metadata.xray.truncated` is set to
+  `true`; if that is not enough, the node is reduced to its ids, timing,
+  flags, and `name` (capped at 200 UTF-16 code units). Nodes that already fit
+  are byte-for-byte unchanged.
+  **Behaviour change:** an emitted document can now differ from the recorded
+  one, and a string can appear where a `metadata` map value used to be. The
+  fix guarantees the packet fits the datagram, not that the X-Ray service
+  accepts it. Ids passed directly to `runLambda` are not capped, so a huge id
+  can still exceed the limit.
+
 ## 0.5.0
 
 ### Added
