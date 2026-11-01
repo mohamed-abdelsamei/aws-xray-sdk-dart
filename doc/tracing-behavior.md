@@ -435,7 +435,7 @@ status flags, `name` cut to 200 UTF-16 code units) plus the marker; `user`,
 `origin`, `http`, `aws`, `cause` and `annotations` are dropped. The recorded
 model is never changed, and a node that already fits is sent unchanged.
 
-The encoder's output fits the datagram (assuming normal-length ids; packets given directly to `sendPackets` are not checked), but this it does not guarantee the X-Ray service
+The encoder's output fits the datagram (assuming normal-length ids; packets given directly to `sendPackets` are not checked), but it does not guarantee the X-Ray service
 accepts or samples the trimmed document. Metadata is not indexed, so the
 marker cannot be used as a filter in X-Ray. Code that reads the document back
 will see a string where a metadata value used to be. The macOS local limit

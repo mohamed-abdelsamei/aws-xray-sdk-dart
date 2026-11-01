@@ -24,7 +24,8 @@
   values become the string `[truncated: N bytes]` (only as many as needed,
   and only when the marker is shorter) and `metadata.xray.truncated` is set to
   `true`; if that is not enough, the node is reduced to its ids, timing,
-  flags, and `name` (capped at 200 UTF-16 code units). Nodes that already fit
+  flags, and `name` (capped at 200 UTF-16 code units); `http`, `aws`, `cause`
+  and `user` data is dropped in that case. Nodes that already fit
   are byte-for-byte unchanged.
   **Behaviour change:** an emitted document can now differ from the recorded
   one, and a string can appear where a `metadata` map value used to be. The
