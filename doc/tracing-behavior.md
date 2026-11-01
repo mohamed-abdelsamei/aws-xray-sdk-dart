@@ -476,8 +476,19 @@ added in any release.
   tracer's hook is running, a diagnostic raised on the same call stack (by any
   tracer) is ignored. A custom sender that encodes outside its send call (in a
   different zone) will not report `node_trimmed`.
+- `daemon_address_invalid`: `XRay.configure` found `AWS_XRAY_DAEMON_ADDRESS`
+  set but malformed and fell back to `127.0.0.1:2000`. The message includes
+  the value, sanitized (URLs redacted, control characters replaced, so it is one
+  line) and shortened to about 100 characters. It is emitted once per install:
+  a second `configure` is a no-op, and `XRay.reset()` followed by `configure`
+  warns again. It is emitted only when
+  `configure` builds the tracer itself (not with a prebuilt `tracer:`); an
+  unset or empty variable never reports. With no `onDiagnostic` callback,
+  `configure` writes one line to `stderr` instead (a closed `stderr` is
+  ignored). This is the only case where the SDK prints without a callback.
 - Send failures are not diagnostics; they go to `onSendError` only.
-- With no callback set, behaviour is unchanged and nothing is printed.
+- Apart from the malformed daemon address above, nothing is printed when no
+  callback is set.
 
 ## Supported Runtimes And Scope
 

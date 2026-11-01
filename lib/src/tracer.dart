@@ -29,8 +29,19 @@ void reportDiagnostic(
   String message, {
   Object? error,
   StackTrace? stackTrace,
+}) =>
+    deliverDiagnostic(tracer.onDiagnostic, code, message,
+        error: error, stackTrace: stackTrace);
+
+/// Internal, hidden from the package barrel: [reportDiagnostic] for a bare
+/// [hook], for callers that run before a tracer exists. Same guards.
+void deliverDiagnostic(
+  void Function(XRayDiagnostic diagnostic)? hook,
+  String code,
+  String message, {
+  Object? error,
+  StackTrace? stackTrace,
 }) {
-  final hook = tracer.onDiagnostic;
   if (hook == null || _inDiagnosticHook) return;
   _inDiagnosticHook = true;
   try {

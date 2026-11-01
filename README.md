@@ -640,7 +640,10 @@ XRay.configure(
 ```
 
 `XRayDiagnostic.code` is a stable string, not an enum, so new codes can appear
-in any release. Codes in use: `node_trimmed` (a single segment or subsegment
+in any release. Codes in use: `daemon_address_invalid` (`XRay.configure` found a malformed
+`AWS_XRAY_DAEMON_ADDRESS` and fell back to `127.0.0.1:2000`; with no
+`onDiagnostic` it writes one line to `stderr` instead, and an unset or empty
+variable never reports; once per install), `node_trimmed` (a single segment or subsegment
 was too large for one datagram and its metadata was shortened or dropped) and
 `adapter_failed` (an adapter you registered for a Smithy client threw: the
 `requestAdapter`, its `withTraceHeader`, the resource extractor, the

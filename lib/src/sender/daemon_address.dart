@@ -30,22 +30,35 @@ const _fallback = (defaultDaemonHost, defaultDaemonPort);
 /// unrecognized multi-part values) falls back to `127.0.0.1:2000` as a
 /// whole — we never mix a parsed host with a default port from a bad value,
 /// because a half-parsed address is harder to diagnose than the default.
-(String, int) parseDaemonAddress(String? value) {
+(String, int) parseDaemonAddress(String? value) =>
+    _tryParse(value?.trim() ?? '') ?? _fallback;
+
+/// Whether [value] is set (non-blank) but [parseDaemonAddress] cannot parse
+/// it, so it silently became `127.0.0.1:2000`. Unset and blank are not
+/// malformed. Internal; never throws.
+bool isMalformedDaemonAddress(String? value) {
   final trimmed = value?.trim() ?? '';
-  if (trimmed.isEmpty) return _fallback;
+  return trimmed.isNotEmpty && _tryParse(trimmed) == null;
+}
+
+/// The parse behind both public functions; null when malformed. [trimmed]
+/// must already be trimmed and non-empty for a meaningful result (empty
+/// yields null).
+(String, int)? _tryParse(String trimmed) {
+  if (trimmed.isEmpty) return null;
 
   final parts = trimmed.split(RegExp(r'\s+'));
   bool isProtocolPart(String p) => p.startsWith('tcp:') || p.startsWith('udp:');
   if (parts.any(isProtocolPart)) {
     // Every part must be prefixed: `udp:h:p garbage` is malformed, not a
     // udp address with trailing noise.
-    if (parts.length > 2 || !parts.every(isProtocolPart)) return _fallback;
+    if (parts.length > 2 || !parts.every(isProtocolPart)) return null;
     final udp = parts.where((p) => p.startsWith('udp:')).toList();
-    if (udp.length != 1) return _fallback;
-    return _parseHostPort(udp.single.substring('udp:'.length)) ?? _fallback;
+    if (udp.length != 1) return null;
+    return _parseHostPort(udp.single.substring('udp:'.length));
   }
-  if (parts.length != 1) return _fallback;
-  return _parseHostPort(trimmed) ?? _fallback;
+  if (parts.length != 1) return null;
+  return _parseHostPort(trimmed);
 }
 
 /// Parses a single address with no protocol prefix; null when malformed.
