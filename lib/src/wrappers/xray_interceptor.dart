@@ -48,17 +48,28 @@ final class XRayInterceptor<Req, Res> {
     required ResourceExtractor extractor,
     required SmithyRequestAdapter<Req> Function(Req) requestAdapter,
     required SmithyResponseAdapter<Res> Function(Res) responseAdapter,
+    int? Function(Object error)? errorStatus,
   })  : _tracer = tracer,
         _namespace = namespace,
         _extractor = extractor,
         _requestAdapter = requestAdapter,
-        _responseAdapter = responseAdapter;
+        _responseAdapter = responseAdapter,
+        _errorStatus = errorStatus;
 
   final XRayTracer _tracer;
   final String _namespace;
   final ResourceExtractor _extractor;
   final SmithyRequestAdapter<Req> Function(Req) _requestAdapter;
   final SmithyResponseAdapter<Res> Function(Res) _responseAdapter;
+
+  /// Optional: maps an error thrown by the wrapped send to its HTTP status.
+  ///
+  /// Smithy clients throw on 4xx as well as 5xx. When this returns a status
+  /// of 400 or above, the subsegment is classified like a response with that
+  /// status (4xx error, 429 throttle, 5xx fault) and records
+  /// `http.response.status`. A null or sub-400 result, or a throw, keeps the
+  /// default: fault, or throttle when the error matches a throttle code.
+  final int? Function(Object error)? _errorStatus;
 
   /// Returns a new send function that wraps [inner] with tracing.
   ///
@@ -118,9 +129,22 @@ final class XRayInterceptor<Req, Res> {
           response = await runWithoutDartIoTracing(() => inner(tracedRequest));
         } catch (e) {
           try {
+            final status = _statusOf(e);
+            final isThrottle = isThrottleErrorCode(e.runtimeType.toString()) ||
+                isThrottleErrorCode(e.toString());
             final failed = sub.withHttp(requestOnly).withAws(awsData);
-            if (isThrottleErrorCode(e.runtimeType.toString()) ||
-                isThrottleErrorCode(e.toString())) {
+            if (status != null) {
+              var classified = failed
+                  .withHttp(HttpData(
+                    request: requestOnly.request,
+                    response: HttpResponseData(status: status),
+                  ))
+                  .applyStatus(status);
+              if (isThrottle) classified = classified.withThrottle();
+              _tracer.endSubsegment(classified.withCause(Cause(
+                exceptions: [XRayException.from(e)],
+              )));
+            } else if (isThrottle) {
               _tracer.endSubsegment(failed.withThrottle().withCause(Cause(
                     exceptions: [XRayException.from(e)],
                   )));
@@ -169,6 +193,19 @@ final class XRayInterceptor<Req, Res> {
         }
         return response;
       };
+
+  /// The status [_errorStatus] reports for [error], or null when there is no
+  /// hook, it throws, or it returns a non-error (< 400) status.
+  int? _statusOf(Object error) {
+    final hook = _errorStatus;
+    if (hook == null) return null;
+    try {
+      final status = hook(error);
+      return status != null && status >= 400 ? status : null;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Last-resort close of the bare [sub] so it is never left pending.
   void _endQuietly(Subsegment sub) {

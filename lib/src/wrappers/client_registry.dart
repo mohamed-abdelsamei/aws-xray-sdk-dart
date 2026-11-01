@@ -25,6 +25,7 @@ final class ClientDescriptor<T extends Object> {
     required this.requestAdapter,
     required this.responseAdapter,
     required this.rebuild,
+    this.errorStatus,
   });
 
   /// X-Ray subsegment namespace (`aws` or `remote`). Values passed to
@@ -76,6 +77,11 @@ final class ClientDescriptor<T extends Object> {
   /// }
   /// ```
   final T Function(T original, XRayWrapFn wrapSend) rebuild;
+
+  /// Optional: maps an error thrown by the client's send to its HTTP status,
+  /// so thrown 4xx responses are recorded as errors (429 as throttles)
+  /// instead of faults. Return null when the status is unknown.
+  final int? Function(Object error)? errorStatus;
 }
 
 /// Global registry mapping client [Type] → [ClientDescriptor].

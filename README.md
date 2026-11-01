@@ -355,6 +355,22 @@ The response adapter fields map directly to X-Ray metadata:
 - `errorCode` is used to mark AWS throttles even when the HTTP status is not
   `429`.
 
+Smithy clients throw on 4xx responses as well as 5xx, and a thrown call is
+recorded as a fault by default. Pass the optional `errorStatus` hook to report
+the HTTP status carried by the error, so it is classified like a response
+(4xx error, 429 throttle, 5xx fault) and recorded as `http.response.status`:
+
+```dart
+XRay.registerClient<DynamoDbClient>(
+  // requestAdapter, responseAdapter, rebuild as above
+  errorStatus: (e) => e is SmithyHttpException ? e.statusCode : null,
+);
+```
+
+Returning `null` (or a status below 400), or throwing, keeps the default:
+fault, or throttle when the error matches a known throttle code. The original
+error is always rethrown unchanged.
+
 Registered client namespaces are normalized to X-Ray schema values. Use `aws`
 for AWS service clients and `remote` for other downstream clients; legacy
 `AWS::...` values are treated as `aws`.

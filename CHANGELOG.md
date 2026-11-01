@@ -2,6 +2,15 @@
 
 ## 0.4.2
 
+### Added
+
+- **`errorStatus` hook for Smithy clients.** `XRay.registerClient` (and
+  `ClientDescriptor` / `XRayInterceptor`) accept an optional
+  `errorStatus: int? Function(Object error)`. When it returns a status of 400
+  or above for a thrown error, the subsegment is classified like a response
+  (4xx error, 429 throttle, 5xx fault) and records `http.response.status`
+  instead of always being a fault. Without the hook, behaviour is unchanged.
+
 ### Fixed
 
 - **Large Lambda traces are no longer dropped.** `runLambda` sent the

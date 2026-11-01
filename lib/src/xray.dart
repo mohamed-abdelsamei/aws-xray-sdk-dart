@@ -203,6 +203,7 @@ abstract final class XRay {
       extractor: descriptor.extractor,
       requestAdapter: descriptor.requestAdapter,
       responseAdapter: descriptor.responseAdapter,
+      errorStatus: descriptor.errorStatus,
     );
 
     return descriptor.rebuild(client, interceptor.wrap);
@@ -222,6 +223,11 @@ abstract final class XRay {
   /// extract the client's underlying send function, pass it through [wrapSend],
   /// and return a new client using the intercepted send.
   ///
+  /// [errorStatus] is optional. Smithy clients throw on 4xx as well as 5xx;
+  /// return the HTTP status carried by the thrown error so a 4xx is recorded
+  /// as an error (429 as a throttle) rather than a fault. Return null when
+  /// unknown; a null, sub-400 status, or throwing hook falls back to fault.
+  ///
   /// Call once at application startup, before any [fromClient] call:
   /// ```dart
   /// XRay.registerClient<DynamoDbClient>(
@@ -239,6 +245,7 @@ abstract final class XRay {
     required SmithyRequestAdapter<Object> Function(Object) requestAdapter,
     required SmithyResponseAdapter<Object> Function(Object) responseAdapter,
     required T Function(T original, XRayWrapFn wrapSend) rebuild,
+    int? Function(Object error)? errorStatus,
   }) {
     final resolvedNamespace = _traceNamespace(namespace ?? 'aws');
     final resolvedExtractor =
@@ -250,6 +257,7 @@ abstract final class XRay {
       requestAdapter: requestAdapter,
       responseAdapter: responseAdapter,
       rebuild: rebuild,
+      errorStatus: errorStatus,
     );
   }
 
