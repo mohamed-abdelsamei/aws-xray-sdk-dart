@@ -39,15 +39,33 @@ List<List<int>> encode(Segment segment) {
   return result;
 }
 
+/// Encodes [sub] as one or more independent subsegment documents parented to
+/// [parentId], splitting it the same way [encode] splits an oversized
+/// segment's children so every datagram stays within the 64 KB cap.
+///
+/// [json] overrides `sub.toJson()` for the root document only (e.g. with a
+/// field removed); descendants always use their own `toJson()`.
+List<List<int>> encodeSubsegmentDocs(
+  Subsegment sub,
+  String parentId,
+  String traceId, {
+  Map<String, Object?>? json,
+}) {
+  final out = <List<int>>[];
+  _emitSubsegment(sub, parentId, traceId, out, json: json);
+  return out;
+}
+
 /// Emits [sub] (and, if needed, its descendants) as independent subsegment
 /// documents into [out], keeping each datagram within [_maxUdpBytes].
 void _emitSubsegment(
   Subsegment sub,
   String parentId,
   String traceId,
-  List<List<int>> out,
-) {
-  final json = sub.toJson();
+  List<List<int>> out, {
+  Map<String, Object?>? json,
+}) {
+  json ??= sub.toJson();
   final doc = encodeSubsegmentDoc(json, parentId, traceId);
   if (doc.length <= _maxUdpBytes || sub.subsegments.isEmpty) {
     // Fits, or is a leaf we cannot split further — emit as-is.

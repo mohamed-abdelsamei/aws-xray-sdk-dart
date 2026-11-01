@@ -207,7 +207,9 @@ final class XRayTracer {
   /// silently drops), this method emits a single **independent subsegment
   /// document** whose `parent_id` is [lambdaParentId] — the ID of the
   /// auto-created function segment taken from the `Parent=` field of the
-  /// `Lambda-Runtime-Trace-Id` header.
+  /// `Lambda-Runtime-Trace-Id` header. If that document would exceed the
+  /// daemon's 64 KB cap, its children are split out into separate linked
+  /// subsegment documents (see `encodeSubsegmentDocs`).
   ///
   /// All subsegments opened during [fn] (via [beginSubsegment] /
   /// [endSubsegment] / [failSubsegment]) are embedded inside the handler
@@ -251,14 +253,17 @@ final class XRayTracer {
           _safeNotify(() => onSampledDrop?.call(virtualSegment));
           return;
         }
-        final doc = root.toSubsegment().toJson()..remove('namespace');
-        final packet = encodeSubsegmentDoc(
-          doc,
+        final sub = root.toSubsegment();
+        // Split like encode() so an oversized handler doc stays within the
+        // daemon's 64 KB cap; the root's `namespace` is still dropped.
+        final packets = encodeSubsegmentDocs(
+          sub,
           lambdaParentId,
           traceId.toString(),
+          json: sub.toJson()..remove('namespace'),
         );
         try {
-          await _sender.sendPackets([packet]);
+          await _sender.sendPackets(packets);
         } catch (e) {
           // Same containment + observability contract as closeSegment: never
           // fault the invocation, but surface the unintentional drop.

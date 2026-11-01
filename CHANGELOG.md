@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.2
+
+### Fixed
+
+- **Lambda traces over 64 KB are no longer dropped.** `runLambda` sent the
+  whole handler subsegment tree as a single UDP datagram, so a large
+  invocation exceeded the daemon's 64 KB limit and the entire trace was lost.
+  It now uses the same recursive split as standalone segments: the handler
+  document is emitted without its children, and each child becomes its own
+  subsegment document linked by `parent_id`. Small documents are unchanged,
+  byte for byte.
+
 ## 0.4.1
 
 Docs and release-tooling release — no library code changes.

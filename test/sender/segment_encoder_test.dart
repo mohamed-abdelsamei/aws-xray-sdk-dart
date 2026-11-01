@@ -114,4 +114,75 @@ void main() {
       }
     });
   });
+
+  group('encodeSubsegmentDocs', () {
+    const cap = 64 * 1024;
+    const parentId = 'abcdef1234567890';
+    final traceId = TraceId.generate().toString();
+
+    Map<String, Object?> decode(List<int> payload) {
+      final text = utf8.decode(payload);
+      return jsonDecode(text.substring(text.indexOf('\n') + 1))
+          as Map<String, Object?>;
+    }
+
+    // A root with one child, plus a json override (namespace removed, as
+    // runLambda does) padded so the whole document is exactly [size] bytes.
+    // Padding the override map — not the Subsegment — keeps the size exact.
+    (Subsegment, Map<String, Object?>) sized(int size) {
+      final child =
+          Subsegment.begin(name: 'child', namespace: 'remote').close();
+      final sub = Subsegment.begin(name: 'root').addChild(child).close();
+      Map<String, Object?> padded(int n) => (sub.toJson()..remove('namespace'))
+        ..['metadata'] = {
+          'default': {'pad': 'x' * n},
+        };
+      final base = enc.encodeSubsegmentDoc(padded(0), parentId, traceId).length;
+      return (sub, padded(size - base));
+    }
+
+    for (final (label, size) in [
+      ('one byte under the cap', cap - 1),
+      ('exactly at the cap', cap),
+    ]) {
+      test('$label stays one byte-identical packet', () {
+        final (sub, json) = sized(size);
+        final whole = enc.encodeSubsegmentDoc(json, parentId, traceId);
+        expect(whole, hasLength(size));
+
+        final out =
+            enc.encodeSubsegmentDocs(sub, parentId, traceId, json: json);
+        expect(out, [whole]);
+      });
+    }
+
+    test('one byte over the cap splits root and child', () {
+      final (sub, json) = sized(cap + 1);
+      expect(
+          enc.encodeSubsegmentDoc(json, parentId, traceId), hasLength(cap + 1));
+
+      final out = enc.encodeSubsegmentDocs(sub, parentId, traceId, json: json);
+      expect(out, hasLength(2));
+      final root = decode(out[0]);
+      final child = decode(out[1]);
+      expect(root.containsKey('subsegments'), isFalse);
+      expect(root.containsKey('namespace'), isFalse);
+      expect(root['parent_id'], parentId);
+      expect(child['parent_id'], sub.id);
+      expect(child['namespace'], 'remote');
+    });
+
+    test('small doc is byte-identical to encodeSubsegmentDoc', () {
+      final sub = Subsegment.begin(name: 'h')
+          .addChild(Subsegment.begin(name: 'a', namespace: 'aws').close())
+          .annotate('k', 1)
+          .close();
+      final json = sub.toJson()..remove('namespace');
+
+      expect(
+        enc.encodeSubsegmentDocs(sub, parentId, traceId, json: json),
+        [enc.encodeSubsegmentDoc(json, parentId, traceId)],
+      );
+    });
+  });
 }

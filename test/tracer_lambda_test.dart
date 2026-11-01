@@ -21,6 +21,16 @@ class _PacketSender extends Sender {
 
   bool get isEmpty => packets.isEmpty;
 
+  // Every packet decoded, in send order.
+  List<Map<String, Object?>> get docs => [
+        for (final p in packets)
+          () {
+            final raw = utf8.decode(p);
+            return jsonDecode(raw.substring(raw.indexOf('\n') + 1))
+                as Map<String, Object?>;
+          }(),
+      ];
+
   // Decode the last packet: strip the header line and parse the JSON body.
   Map<String, Object?> get lastDoc {
     final raw = utf8.decode(packets.last);
@@ -266,6 +276,113 @@ void main() {
     test('handler doc never carries a namespace field', () async {
       await tracer.runLambda(traceId, parentId, 'handler', () async {});
       expect(sender.lastDoc.containsKey('namespace'), isFalse);
+    });
+
+    test('oversized handler doc is split into linked docs within 64 KB',
+        () async {
+      final big = 'x' * (20 * 1024);
+      await tracer.runLambda(traceId, parentId, 'handler', () async {
+        for (var i = 0; i < 5; i++) {
+          await tracer.captureAsync('child-$i', (span) async {
+            tracer.addMetadata('blob', big);
+          });
+        }
+      });
+
+      expect(sender.packets.length, greaterThan(1));
+      final docs = sender.packets.map((p) {
+        expect(p.length, lessThanOrEqualTo(64 * 1024));
+        final raw = utf8.decode(p);
+        return jsonDecode(raw.substring(raw.indexOf('\n') + 1))
+            as Map<String, Object?>;
+      }).toList();
+
+      final root = docs.first;
+      expect(root['name'], 'handler');
+      expect(root['parent_id'], parentId);
+      expect(root.containsKey('namespace'), isFalse);
+      expect(root.containsKey('subsegments'), isFalse);
+      for (final d in docs) {
+        expect(d['type'], 'subsegment');
+        expect(d['trace_id'], traceId.toString());
+      }
+      final children = docs.skip(1).toList();
+      expect(children.map((d) => d['name']),
+          ['child-0', 'child-1', 'child-2', 'child-3', 'child-4']);
+      for (final c in children) {
+        expect(c['parent_id'], root['id']);
+      }
+    });
+
+    test('oversized child is split recursively; children keep namespace',
+        () async {
+      final big = 'x' * (25 * 1024);
+      await tracer.runLambda(traceId, parentId, 'handler', () async {
+        await tracer.captureAsync('outer', (_) async {
+          for (var i = 0; i < 3; i++) {
+            await tracer.captureAsync('g$i', (_) async {
+              tracer.addMetadata('blob', big);
+            }, namespace: 'aws');
+          }
+        }, namespace: 'remote');
+        await tracer.captureAsync('small', (_) async {}, namespace: 'aws');
+      });
+
+      for (final p in sender.packets) {
+        expect(p.length, lessThanOrEqualTo(64 * 1024));
+      }
+      final docs = sender.docs;
+      expect(docs.map((d) => d['name']),
+          ['handler', 'outer', 'g0', 'g1', 'g2', 'small']);
+
+      final root = docs[0];
+      final outer = docs[1];
+      expect(root.containsKey('namespace'), isFalse);
+      expect(root['parent_id'], parentId);
+      expect(outer['parent_id'], root['id']);
+      expect(outer['namespace'], 'remote');
+      expect(outer.containsKey('subsegments'), isFalse);
+      for (final g in docs.sublist(2, 5)) {
+        expect(g['parent_id'], outer['id']);
+        expect(g['namespace'], 'aws');
+      }
+      expect(docs[5]['parent_id'], root['id']);
+      expect(docs[5]['namespace'], 'aws');
+      for (final d in docs) {
+        expect(d['trace_id'], traceId.toString());
+        expect(d['type'], 'subsegment');
+      }
+      expect(docs.map((d) => d['id']).toSet(), hasLength(docs.length));
+    });
+
+    test('swept and faulted children keep their flags in split docs', () async {
+      final big = 'x' * (40 * 1024);
+      await tracer.runLambda(traceId, parentId, 'handler', () async {
+        final open =
+            tracer.beginSubsegment('never-closed', namespace: 'remote');
+        tracer.updatePending(open.addMetadata('blob', big));
+        try {
+          await tracer.captureAsync('boom', (_) async {
+            tracer.addMetadata('blob', big);
+            throw StateError('boom');
+          });
+        } on StateError catch (_) {}
+      });
+
+      final docs = sender.docs;
+      expect(docs, hasLength(3));
+      final rootId = docs[0]['id'];
+      final byName = {for (final d in docs) d['name']: d};
+
+      final swept = byName['never-closed']!;
+      expect((swept['metadata'] as Map)['xray'], {'incomplete': true});
+      expect(swept['namespace'], 'remote');
+      expect(swept.containsKey('in_progress'), isFalse);
+      expect(swept['parent_id'], rootId);
+
+      final boom = byName['boom']!;
+      expect(boom['fault'], isTrue);
+      expect(boom['parent_id'], rootId);
     });
   });
 
