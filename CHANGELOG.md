@@ -13,6 +13,13 @@
 
 ### Fixed
 
+- **`onSendError` now fires for transport failures.** The `UdpSender` the
+  tracer builds itself (no `sender` argument) swallowed resolve, bind, and
+  datagram-send errors, so `onSendError` only ever saw encode errors. It now
+  reports those local failures too, at most once per segment send, and never
+  throws into the app. `runLambda` also reports a document that fails to
+  encode (such as a cyclic metadata map) instead of dropping it silently. A
+  user-supplied `Sender` is unchanged.
 - **Large Lambda traces are no longer dropped.** `runLambda` sent the
   whole handler subsegment tree as a single UDP datagram, so a large
   invocation exceeded the datagram limit and the entire trace was lost.

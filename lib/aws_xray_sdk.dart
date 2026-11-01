@@ -23,7 +23,7 @@
 library;
 
 // Core
-export 'src/tracer.dart';
+export 'src/tracer.dart' hide newTracerWithUdpSeamsForTesting;
 export 'src/xray.dart';
 
 // Models
