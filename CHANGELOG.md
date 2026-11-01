@@ -11,7 +11,7 @@
   can appear in any release; only the SDK creates diagnostics (no public
   constructor). Codes in this release:
   - `node_trimmed`: a single oversized segment or subsegment was trimmed to fit
-    the datagram (see 0.5.1). Reported only through senders that encode in
+    the datagram (see "Oversized single nodes are trimmed" under Fixed). Reported only through senders that encode in
     their send call, such as `UdpSender`.
   - `adapter_failed`: code you registered for a Smithy client threw and was
     contained: the `requestAdapter`, its `withTraceHeader` injection, the
@@ -45,11 +45,6 @@
   `configure` reports again. Unset or empty values never report, and nothing
   is reported when you supply `tracer:`. The fallback itself is unchanged.
   This is the only such line that fires at configure time.
-
-## 0.5.1
-
-### Changed
-
 - **Behaviour change — `aws.queue_url` and `aws.resource_names` are redacted
   like `http.request.url`.** The emitted document drops userinfo, query
   strings, and fragments from `aws.queue_url` and from every
