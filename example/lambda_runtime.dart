@@ -1,7 +1,8 @@
 // Example: AWS Lambda handler with X-Ray tracing.
 //
 // Runs a simulated Lambda invocation locally — no daemon required.
-// The traced segment document is printed to stdout for inspection.
+// It prints the handler result; the trace goes to a NoopSender and is
+// discarded (swap in InMemorySender to inspect the emitted document).
 //
 // KEY POINTS
 //

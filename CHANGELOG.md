@@ -1,12 +1,11 @@
 # Changelog
 
-## 0.4.2
+## 0.5.0
 
 ### Added
 
-- **`errorStatus` hook for Smithy clients.** `XRay.registerClient` (and
-  `ClientDescriptor` / `XRayInterceptor`) accept an optional
-  `errorStatus: int? Function(Object error)`. When it returns a status of 400
+- **`errorStatus` hook for Smithy clients.** `XRay.registerClient` accepts an
+  optional `errorStatus: int? Function(Object error)`. When it returns a status of 400
   or above for a thrown error, the subsegment is classified like a response
   (4xx error, 429 throttle, 5xx fault) and records `http.response.status`
   instead of always being a fault. Without the hook, behaviour is unchanged.
@@ -67,6 +66,20 @@ The entries below change observable behaviour; review them before upgrading.
   throws into the app. `runLambda` also reports a document that fails to
   encode (such as a cyclic metadata map) instead of dropping it silently. A
   user-supplied `UdpSender` keeps reporting through its own `onError`.
+- **One refused datagram no longer silences tracing for good.** When the OS
+  refuses a datagram (for example one over the datagram limit, or over 9216
+  bytes on macOS's default UDP limit), Dart's socket returns 0 instead of
+  throwing, and every later send on that socket did the same. `UdpSender`
+  ignored this and kept the socket, so all later traces were lost with no
+  error. A short send is now reported through `onError` (and the tracer's
+  `onSendError`), and the socket is replaced so the next send gets through.
+- **`handleTraced` flags failed requests.** The server segment recorded the
+  response status but no flags, so a 500 looked healthy in X-Ray. A 4xx
+  status now sets `error`, 429 sets `throttle` and `error`, and 5xx sets
+  `fault`, matching client subsegments. The same applies to any segment
+  closed by `run()` that carries an `http.response.status`.
+  New: `Segment.applyStatus(int)`, the segment counterpart of
+  `Subsegment.applyStatus`.
 - **Large Lambda traces are no longer dropped.** `runLambda` sent the
   whole handler subsegment tree as a single UDP datagram, so a large
   invocation exceeded the datagram limit and the entire trace was lost.

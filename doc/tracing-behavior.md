@@ -121,7 +121,7 @@ When the SDK injects `X-Amzn-Trace-Id`, the emitted subsegment records:
   applies to every instrumentation path and to user-built `HttpRequestData`.
   If a `?` or `#` comes before an `@`, that `@` may be part of a query: only a
   valid `host[:port]` before the `?` or `#` is kept, the rest is dropped.
-  Before 0.4.2 the full URL, query string included, was recorded.
+  Before 0.5.0 the full URL, query string included, was recorded.
 - URLs inside `cause.exceptions[].message` are redacted with the same rule
   before the message is capped at 1024 characters, so a URL cut by the cap
   cannot leave part of a password behind. This covers messages from caught
@@ -138,7 +138,7 @@ When the SDK injects `X-Amzn-Trace-Id`, the emitted subsegment records:
   with digits (`https://admin:2024/s3cret@h/p`, `https://u:123?x@h/p` and
   `https://user?pw@h/p` cannot be told apart from host, port and path or
   query), secrets in the URL path, and
-  secrets that are not URLs at all. Before 0.4.2 messages were recorded as
+  secrets that are not URLs at all. Before 0.5.0 messages were recorded as
   thrown.
 - `http.request.traced = true` is asserted on completed response paths after the
   SDK injects `X-Amzn-Trace-Id`.

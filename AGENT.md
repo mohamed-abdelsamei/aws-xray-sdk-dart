@@ -78,7 +78,7 @@ lib/
       daemon_address.dart    # parseDaemonAddress() — AWS_XRAY_DAEMON_ADDRESS, all formats
       noop_sender.dart       # NoopSender — discards all (local dev)
       in_memory_sender.dart  # InMemorySender — records segments + packets for test assertions
-      segment_encoder.dart   # encode(), encodeSubsegmentDoc() — 65507-byte split logic
+      segment_encoder.dart   # encode(), encodeSubsegmentDocs() — 65507-byte split logic
     http/
       xray_http_client.dart  # XRayHttpClient — wraps dart:io HttpClient
       xray_http_overrides.dart # XRayHttpOverrides — global dart:io patch
@@ -170,7 +170,7 @@ set keeps a late body-stream close after a sweep from double-attaching.
 A UDP datagram over IPv4 carries at most **65507 bytes** (65535 − 8 UDP header
 − 20 IP header). `encode()` splits an oversized segment into a skeleton segment
 plus independent subsegment documents, recursing into nested children; the
-Lambda path (`encodeSubsegmentDoc()`) splits the same way. A single node that is
+Lambda path (`encodeSubsegmentDocs()`) splits the same way. A single node that is
 over the cap on its own is still sent whole (known gap).
 
 ### Redaction at serialization
@@ -323,7 +323,7 @@ publish, dispatch **Publish to pub.dev** on the existing tag.
 - `pubspec.lock` is gitignored (library, not an app).
 - One runtime dependency: `http` (for `XRayBaseClient`); otherwise only `dart:io` / `dart:convert` / `dart:async`.
 - Release tags come only from the manual **Release** workflow (or a hand-pushed `git tag`); nothing tags or publishes on merges to `main`.
-- PR titles and commits are Conventional Commits with a **lowercase subject** (enforced by `commitlint.yml`); use `fix!:` / `feat!:` for behaviour changes.
+- PR titles and commits are Conventional Commits with a **lowercase subject** (enforced by `commitlint.yml`); use `fix!:` / `feat!:` only for breaking API or contract changes (behaviour changes that are not breaking get a plain `fix:`/`feat:` and a CHANGELOG note).
 - `feat` / `fix` / `perf` / breaking changes get a `CHANGELOG.md` entry under a `## X.Y.Z` heading — never `## Unreleased`, which the release workflow does not recognise.
 - Don't bump `pubspec.yaml`'s version; the Release workflow does it.
 
@@ -331,7 +331,7 @@ publish, dispatch **Publish to pub.dev** on the existing tag.
 
 ## Testing
 
-`test/` mirrors `lib/src/` (30 test files). Common patterns when adding tests:
+`test/` mirrors `lib/src/`. Common patterns when adding tests:
 
 - **Assert on emitted output with `InMemorySender`.** Build the tracer with one,
   exercise the code, then inspect `sender.segments` (closed `Segment`s, the
