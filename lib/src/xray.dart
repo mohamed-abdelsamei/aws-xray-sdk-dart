@@ -265,8 +265,15 @@ abstract final class XRay {
   /// is wrapped with [XRayHttpClient].
   ///
   /// Chains any existing [HttpOverrides.global] so other patches are preserved.
+  /// Idempotent while the X-Ray layer is the current override: calling it
+  /// again replaces that layer instead of nesting a second one, so each
+  /// request is traced once, [tracer] takes effect, and a single
+  /// [unpatchHttp] restores the pre-patch overrides. If other overrides were
+  /// installed on top of the X-Ray layer since, a new layer is added on top.
   static void patchHttp(XRayTracer tracer) {
-    HttpOverrides.global = XRayHttpOverrides(tracer, HttpOverrides.current);
+    final current = HttpOverrides.current;
+    final previous = current is XRayHttpOverrides ? current.previous : current;
+    HttpOverrides.global = XRayHttpOverrides(tracer, previous);
   }
 
   /// Removes the X-Ray `dart:io` HTTP patch, restoring the previous overrides.

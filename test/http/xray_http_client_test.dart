@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
+import 'package:aws_xray_sdk/src/http/xray_http_overrides.dart';
 import 'package:test/test.dart';
 
 class _RecordingSender extends Sender {
@@ -60,6 +61,74 @@ void main() {
       expect(HttpOverrides.current, same(first));
 
       HttpOverrides.global = null;
+    });
+
+    test('patching twice records exactly one subsegment per request', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((req) => req.response.close());
+      final sender = _RecordingSender();
+      final recording = XRayTracer(
+        serviceName: 'svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+      );
+
+      XRay.patchHttp(recording);
+      XRay.patchHttp(recording);
+
+      await recording.run(recording.beginSegment(), () async {
+        final client = HttpClient();
+        final req = await client.getUrl(
+          Uri.parse('http://127.0.0.1:${server.port}/'),
+        );
+        await (await req.close()).drain<void>();
+        client.close();
+      });
+
+      expect(sender.lastSubs, hasLength(1));
+    });
+
+    test('patching twice then unpatching once restores custom overrides', () {
+      final custom = _NoopOverrides();
+      HttpOverrides.global = custom;
+      addTearDown(() => HttpOverrides.global = null);
+
+      XRay.patchHttp(tracer);
+      XRay.patchHttp(tracer);
+      XRay.unpatchHttp();
+
+      expect(HttpOverrides.current, same(custom));
+    });
+
+    test('patching twice then unpatching once restores no overrides', () {
+      final original = HttpOverrides.current;
+      XRay.patchHttp(tracer);
+      XRay.patchHttp(tracer);
+      XRay.unpatchHttp();
+      expect(HttpOverrides.current, same(original));
+    });
+
+    test('re-patching with a different tracer replaces the layer', () {
+      final custom = _NoopOverrides();
+      HttpOverrides.global = custom;
+      addTearDown(() => HttpOverrides.global = null);
+
+      XRay.patchHttp(tracer);
+      final firstLayer = HttpOverrides.current;
+      XRay.patchHttp(
+        XRayTracer(
+          serviceName: 'other',
+          sender: NoopSender(),
+          sampling: FixedRateSampler(1.0),
+        ),
+      );
+
+      final second = HttpOverrides.current;
+      expect(second, isA<XRayHttpOverrides>());
+      expect(second, isNot(same(firstLayer)));
+      // The old layer (and its tracer) is dropped, not wrapped.
+      expect((second! as XRayHttpOverrides).previous, same(custom));
     });
 
     test('createHttpClient returns an HttpClient after patching', () {

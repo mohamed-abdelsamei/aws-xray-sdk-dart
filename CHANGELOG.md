@@ -30,6 +30,11 @@
 
 ### Fixed
 
+- **`XRay.patchHttp` is idempotent.** Calling it twice nested two X-Ray
+  layers, so every `dart:io` request was traced twice and one `unpatchHttp()`
+  removed only one layer. A repeat call now replaces the X-Ray layer (using
+  the new tracer) instead of wrapping it, and a single `unpatchHttp()`
+  restores the overrides that were in place before the first patch.
 - **Exception messages are capped and never throw.** `XRayException.from`
   truncates messages over 1024 UTF-16 code units and appends `…[truncated]`
   (without splitting a surrogate pair). If an error's `toString()` throws, the
