@@ -28,6 +28,8 @@ class _FailingSendSocket implements RawDatagramSocket {
 typedef _Report = ({Segment segment, Object error});
 
 void main() {
+  group('wedged socket', _zeroByteSendTests);
+
   final traceId = TraceId.generate();
   const parentId = 'abcdef1234567890';
 
@@ -221,5 +223,59 @@ void main() {
       expect(senderErrors.single, isA<SocketException>());
       expect(hookCalls, 0);
     });
+  });
+}
+
+// A socket the OS has wedged: send returns 0 without throwing.
+class _ZeroSendSocket implements RawDatagramSocket {
+  _ZeroSendSocket({required this.refuse});
+
+  final bool refuse;
+  int delivered = 0;
+  bool closed = false;
+
+  @override
+  int send(List<int> buffer, InternetAddress address, int port) {
+    if (refuse) return 0;
+    delivered++;
+    return buffer.length;
+  }
+
+  @override
+  void close() => closed = true;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+void _zeroByteSendTests() {
+  test('a zero-byte datagram send reaches onSendError; next run rebinds',
+      () async {
+    final sockets = <_ZeroSendSocket>[];
+    final reports = <_Report>[];
+    final tracer = newTracerWithUdpSeamsForTesting(
+      serviceName: 'svc',
+      sampling: FixedRateSampler(1.0),
+      socketFactory: (_) async {
+        final s = _ZeroSendSocket(refuse: sockets.isEmpty);
+        sockets.add(s);
+        return s;
+      },
+      onSendError: (s, e) => reports.add((segment: s, error: e)),
+    );
+    final segment = tracer.beginSegment();
+
+    final result = await tracer.run(segment, () async => 'ok');
+
+    expect(result, 'ok');
+    expect(reports, hasLength(1));
+    expect(reports.single.segment.id, segment.id);
+    expect(reports.single.error, isA<SocketException>());
+    expect(sockets.single.closed, isTrue);
+
+    expect(await tracer.run(tracer.beginSegment(), () async => 2), 2);
+    expect(sockets, hasLength(2));
+    expect(sockets[1].delivered, 1);
+    expect(reports, hasLength(1));
   });
 }

@@ -60,20 +60,51 @@ final class UdpSender extends Sender {
     if (packets.isEmpty) return;
     // Total containment: a resolution, bind, or send failure must never escape
     // into the traced operation. Tracing is fire-and-forget.
-    final _Conn conn;
-    try {
-      conn = await _obtainConn();
-    } catch (e) {
-      _report(e); // resolution or bind failure
-      return;
-    }
+    Future<_Conn>? memo;
+    _Conn? conn;
     for (final payload in packets) {
+      // (Re)acquire when there is no connection yet, or when the one in hand was
+      // dropped after a refused datagram (by this or a concurrent send — which
+      // can happen while this send awaits, hence the re-check).
+      while (conn == null || conn.dropped) {
+        try {
+          memo = _obtainConn();
+          conn = await memo;
+        } catch (e) {
+          _report(e); // resolution or bind failure
+          return;
+        }
+      }
       try {
-        conn.socket.send(payload, conn.address, port);
+        final sent = conn.socket.send(payload, conn.address, port);
+        if (sent < payload.length) {
+          // The OS refused the datagram without throwing (e.g. over the
+          // platform's size limit). Such a socket keeps returning 0 for every
+          // later send, so drop it and rebind on next use.
+          _report(SocketException(
+            'UDP datagram of ${payload.length} bytes was not sent '
+            '(socket accepted $sent bytes)',
+          ));
+          _drop(memo!, conn);
+        }
       } catch (e) {
         // A single datagram failure must not abort the rest of the batch.
         _report(e);
       }
+    }
+  }
+
+  /// Forgets [conn] (if [memo] is still the cached connection) and closes its
+  /// socket. Sends are synchronous, so no other send is mid-use of the socket;
+  /// a concurrent send still holding [conn] sees [_Conn.dropped] and
+  /// reacquires before its next datagram.
+  void _drop(Future<_Conn> memo, _Conn conn) {
+    if (identical(_conn, memo)) _conn = null;
+    conn.dropped = true;
+    try {
+      conn.socket.close();
+    } catch (_) {
+      // Already closed — nothing to release.
     }
   }
 
@@ -92,9 +123,9 @@ final class UdpSender extends Sender {
   /// The memoized connection, creating it on first use.
   ///
   /// Concurrent callers share a single in-flight attempt (no per-send DNS
-  /// stampede). A *successful* attempt is cached for the process; a *failed*
-  /// attempt is cleared so the next send retries — important when the daemon or
-  /// DNS is not ready at first send.
+  /// stampede). A *successful* attempt is cached until a datagram is refused
+  /// on it (see [_drop]); a *failed* attempt is cleared so the next send
+  /// retries — important when the daemon or DNS is not ready at first send.
   Future<_Conn> _obtainConn() {
     final existing = _conn;
     if (existing != null) return existing;
@@ -128,7 +159,9 @@ final class UdpSender extends Sender {
     _conn = null;
     if (conn != null) {
       try {
-        (await conn).socket.close();
+        (await conn)
+          ..dropped = true
+          ..socket.close();
       } catch (_) {
         // Connection never completed (or already closed) — nothing to release.
       }
@@ -152,4 +185,7 @@ class _Conn {
   _Conn(this.address, this.socket);
   final InternetAddress address;
   final RawDatagramSocket socket;
+
+  /// Set once this connection is discarded; holders must reacquire.
+  bool dropped = false;
 }

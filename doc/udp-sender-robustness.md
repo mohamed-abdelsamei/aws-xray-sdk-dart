@@ -57,6 +57,11 @@ address.
   hardcoded `dev.log`; default silent. (No success callback; no per-packet log.)
 - **Failed resolution is not cached** — re-attempted on later sends so a
   late-starting daemon recovers; only successful resolution is memoized.
+- **A refused datagram drops the connection** — when `socket.send()` returns
+  fewer bytes than the payload (the OS refused it; Dart returns 0 instead of
+  throwing, and the socket keeps refusing afterwards), the failure goes to
+  `onError` and the memoized connection is closed and cleared, so the next
+  datagram rebinds a fresh socket.
 - **`close()` is re-openable** — closes the socket and resets the memo.
 
 ## Known limitation (must be documented, not engineered around)
