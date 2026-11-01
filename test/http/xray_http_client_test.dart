@@ -157,6 +157,27 @@ void main() {
       expect(capturedHeader, contains('Sampled=1'));
     });
 
+    test('AC3.1: recorded url has no userinfo, query, or fragment', () async {
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        final client = XRayHttpClient(HttpClient(), tracer);
+        final req = await client.openUrl(
+          'GET',
+          Uri.parse('http://user:pw@127.0.0.1:${server.port}/p'
+              '?X-Amz-Signature=abc#f'),
+        );
+        final res = await req.close();
+        await res.drain<void>();
+        client.close();
+      });
+
+      final sub = sender.lastSubs.first as Map;
+      expect(
+        sub['http']['request']['url'],
+        'http://127.0.0.1:${server.port}/p',
+      );
+    });
+
     test('host/port open() preserves plain HTTP scheme', () async {
       final segment = tracer.beginSegment();
       await tracer.run(segment, () async {

@@ -115,6 +115,11 @@ When the SDK injects `X-Amzn-Trace-Id`, the emitted subsegment records:
 }
 ```
 
+- `http.request.url` is recorded as `scheme://host[:port]/path`. Userinfo
+  (`user:pw@`), the whole query string, and the fragment are always stripped
+  (ADR 0001), so presigned-URL signatures and tokens never reach X-Ray. This
+  applies to every instrumentation path and to user-built `HttpRequestData`.
+  Before 0.4.2 the full URL, query string included, was recorded.
 - `http.request.traced = true` is asserted on completed response paths after the
   SDK injects `X-Amzn-Trace-Id`.
 - `content_length` is recorded when the instrumentation path can observe it.

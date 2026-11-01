@@ -29,6 +29,7 @@ void main() {
       required double rate,
       String? requestTraceHeader,
       Future<void> Function()? handler,
+      String path = '/orders',
     }) async {
       sender = _RecordingSender();
       final tracer = XRayTracer(
@@ -48,7 +49,7 @@ void main() {
 
       final client = HttpClient();
       final req = await client
-          .getUrl(Uri.parse('http://127.0.0.1:${server.port}/orders'));
+          .getUrl(Uri.parse('http://127.0.0.1:${server.port}$path'));
       if (requestTraceHeader != null) {
         req.headers.set('x-amzn-trace-id', requestTraceHeader);
       }
@@ -133,6 +134,17 @@ void main() {
         requestTraceHeader: 'Root=$upstreamTrace;Sampled=1',
       );
       expect(header, contains('Root=$upstreamTrace'));
+    });
+
+    test('AC3.1: recorded url has no query string', () async {
+      await serveAndCapture(
+        rate: 1.0,
+        path: '/orders?X-Amz-Signature=abc',
+      );
+
+      final http = sender.last['http'] as Map<String, Object?>;
+      final request = http['request'] as Map<String, Object?>;
+      expect(request['url'], 'http://127.0.0.1:${server.port}/orders');
     });
 
     test('records request and response http data on the segment', () async {

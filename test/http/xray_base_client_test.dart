@@ -45,6 +45,20 @@ void main() {
       expect(sender.isEmpty, isTrue);
     });
 
+    test('AC3.1: recorded url has no userinfo, query, or fragment', () async {
+      final client = XRayBaseClient(_MockClient(200), tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.get(
+          Uri.parse('https://user:pw@h.example/p?X-Amz-Signature=abc#f'),
+        );
+      });
+
+      final sub = sender.lastSubs.first as Map;
+      expect(sub['http']['request']['url'], 'https://h.example/p');
+    });
+
     test('creates a subsegment for each request', () async {
       final inner = _MockClient(200);
       final client = XRayBaseClient(inner, tracer);

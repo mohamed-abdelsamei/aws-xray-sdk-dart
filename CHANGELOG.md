@@ -13,6 +13,13 @@
 
 ### Changed
 
+- **Recorded URLs no longer include query strings, userinfo, or fragments.**
+  `http.request.url` is now `scheme://host[:port]/path` on every path
+  (`XRayHttpClient`, `XRayBaseClient`, `XRay.fromClient`, `handleTraced`, and
+  user-built `HttpRequestData`), so presigned-URL signatures, OAuth codes, and
+  `user:pw@` credentials stay out of X-Ray. There is no setting to keep the
+  query string. The in-memory `HttpRequestData.url` keeps the raw value; only
+  the emitted document is redacted.
 - **`Sender.sendPackets` now throws `UnsupportedError` by default.** It was a
   silent no-op, so a custom `Sender` that only overrode `send` lost every
   `runLambda` trace without notice. The error names the sender class; the

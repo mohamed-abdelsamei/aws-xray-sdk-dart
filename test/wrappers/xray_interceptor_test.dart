@@ -120,6 +120,21 @@ void main() {
       expect(receivedHeader, contains('Sampled=1'));
     });
 
+    test('AC3.1: recorded url has no userinfo, query, or fragment', () async {
+      final send = _makeInterceptor(tracer).wrap((_) async => const _Res(200));
+
+      final segment = tracer.beginSegment();
+      await tracer.run(
+        segment,
+        () => send(_Req(
+          url: 'https://user:pw@h.example/p?X-Amz-Signature=abc#f',
+        )),
+      );
+
+      final http = sender.firstSub['http'] as Map;
+      expect(http['request']['url'], 'https://h.example/p');
+    });
+
     test('creates a subsegment with the operation name', () async {
       final interceptor = _makeInterceptor(tracer);
       final send = interceptor.wrap((_) async => const _Res(200));
