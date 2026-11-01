@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
 class _RecordingSender extends Sender {
@@ -588,6 +589,105 @@ void main() {
       expect(sub['fault'], isTrue);
       expect(sub['http']['request']['url'], 'https://api.example.com/data');
     });
+  });
+
+  group('XRayBaseClient containment', () {
+    late InMemorySender sender;
+    late XRayTracer tracer;
+
+    setUp(() {
+      sender = InMemorySender();
+      tracer = XRayTracer(
+        serviceName: 'test-svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+      );
+    });
+
+    // Resource fields of the wrong JSON type (AC2.1 / AC2.2).
+    http.Request badBodyRequest() => http.Request(
+          'POST',
+          Uri.parse('https://dynamodb.us-east-1.amazonaws.com/'),
+        )
+          ..headers['X-Amz-Target'] = 'DynamoDB_20120810.GetItem'
+          ..body = '{"TableName":123,"Bucket":["x"]}';
+
+    Map<String, Object?> onlySub() {
+      final json = jsonDecode(jsonEncode(sender.segments.single.toJson()))
+          as Map<String, Object?>;
+      return (json['subsegments'] as List).single as Map<String, Object?>;
+    }
+
+    test('AC2.1 non-string resource fields: 200 returned, names omitted',
+        () async {
+      final client = XRayBaseClient(
+        MockClient((_) async => http.Response('{}', 200)),
+        tracer,
+      );
+
+      late http.StreamedResponse res;
+      await tracer.run(tracer.beginSegment(), () async {
+        res = await client.send(badBodyRequest());
+        await res.stream.drain<void>();
+      });
+
+      expect(res.statusCode, 200);
+      final sub = onlySub();
+      final aws = sub['aws'] as Map;
+      expect(aws['operation'], 'GetItem');
+      expect(aws.containsKey('table_name'), isFalse);
+      expect(aws.containsKey('bucket_name'), isFalse);
+      expect(sub['fault'], isNot(true));
+    });
+
+    test('AC2.2 transport error is rethrown identical, not a TypeError',
+        () async {
+      final boom = const SocketException('connection refused');
+      final client = XRayBaseClient(
+        MockClient((_) async => throw boom),
+        tracer,
+      );
+
+      Object? caught;
+      await tracer.run(tracer.beginSegment(), () async {
+        try {
+          await client.send(badBodyRequest());
+        } catch (e) {
+          caught = e;
+        }
+      });
+
+      expect(caught, same(boom));
+      final sub = onlySub();
+      expect(sub['fault'], isTrue);
+      final aws = sub['aws'] as Map;
+      expect(aws.containsKey('table_name'), isFalse);
+      expect(aws.containsKey('bucket_name'), isFalse);
+    });
+    for (final status in [200, 500]) {
+      test('non-UTF-8 S3 PUT body keeps http status ($status)', () async {
+        final client = XRayBaseClient(
+          MockClient((_) async => http.Response('', status)),
+          tracer,
+        );
+        final req = http.Request(
+          'PUT',
+          Uri.parse('https://my-bucket.s3.us-east-1.amazonaws.com/key.bin'),
+        )..bodyBytes = [0xff, 0xfe, 0x00, 0xc3];
+
+        late http.StreamedResponse res;
+        await tracer.run(tracer.beginSegment(), () async {
+          res = await client.send(req);
+          await res.stream.drain<void>();
+        });
+
+        expect(res.statusCode, status);
+        final sub = onlySub();
+        expect(
+            (sub['http'] as Map)['response'], containsPair('status', status));
+        expect(sub['fault'], status == 500 ? isTrue : isNot(true));
+      });
+    }
   });
 
   // Reproduces the real double-tracing scenario: XRay.patchHttp() is active AND

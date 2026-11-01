@@ -38,6 +38,12 @@
   response and closes the subsegment without response data. Only the
   transport's own error reaches the caller, as the same object with its
   original stack trace.
+- **`XRayBaseClient` no longer faults AWS calls with odd request bodies.** A
+  resource field of the wrong JSON type (for example `"TableName": 123`) threw
+  a `TypeError` that replaced a 200 response, or the transport's own error.
+  Such fields are now left out of the `aws` block. Tracing work after the
+  response arrives is guarded, so a successful response always reaches the
+  caller, and a transport error is rethrown unchanged.
 
 ## 0.4.1
 
