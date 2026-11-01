@@ -1,4 +1,4 @@
-// AC6 (ADR 0002 part A): onSendError fires for transport failures of the
+// onSendError fires for transport failures of the
 // tracer-built UdpSender, at most once per send, and never faults the app.
 // Every socket here is an injected fake; no real socket is opened.
 import 'dart:io';
@@ -31,7 +31,7 @@ void main() {
   final traceId = TraceId.generate();
   const parentId = 'abcdef1234567890';
 
-  group('tracer-built UdpSender reports transport failures (AC6.1)', () {
+  group('tracer-built UdpSender reports transport failures', () {
     test('bind failure on run: onSendError once, result unchanged', () async {
       final reports = <_Report>[];
       final tracer = newTracerWithUdpSeamsForTesting(
@@ -123,7 +123,7 @@ void main() {
     });
   });
 
-  group('concurrent sends are not cross-wired (AC6.1)', () {
+  group('concurrent sends are not cross-wired', () {
     test('each concurrent run reports exactly once for its own segment',
         () async {
       final reports = <_Report>[];
@@ -153,7 +153,7 @@ void main() {
     });
   });
 
-  group('runLambda transport and encode failures (AC6.2, AC6.3)', () {
+  group('runLambda transport and encode failures', () {
     test('bind failure on runLambda: onSendError once with virtual segment',
         () async {
       final reports = <_Report>[];
@@ -199,7 +199,7 @@ void main() {
     });
   });
 
-  group('user-supplied UdpSender is untouched (AC6.4)', () {
+  group('user-supplied UdpSender is untouched', () {
     test('its own onError fires; the tracer adds no onSendError report',
         () async {
       final senderErrors = <Object>[];

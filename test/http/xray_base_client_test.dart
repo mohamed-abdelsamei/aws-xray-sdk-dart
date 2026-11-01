@@ -45,7 +45,7 @@ void main() {
       expect(sender.isEmpty, isTrue);
     });
 
-    test('AC3.1: recorded url has no userinfo, query, or fragment', () async {
+    test('recorded url has no userinfo, query, or fragment', () async {
       final client = XRayBaseClient(_MockClient(200), tracer);
 
       final segment = tracer.beginSegment();
@@ -685,7 +685,7 @@ void main() {
       );
     });
 
-    // Resource fields of the wrong JSON type (AC2.1 / AC2.2).
+    // Resource fields of the wrong JSON type.
     http.Request badBodyRequest() => http.Request(
           'POST',
           Uri.parse('https://dynamodb.us-east-1.amazonaws.com/'),
@@ -699,8 +699,7 @@ void main() {
       return (json['subsegments'] as List).single as Map<String, Object?>;
     }
 
-    test('AC2.1 non-string resource fields: 200 returned, names omitted',
-        () async {
+    test('non-string resource fields: 200 returned, names omitted', () async {
       final client = XRayBaseClient(
         MockClient((_) async => http.Response('{}', 200)),
         tracer,
@@ -721,8 +720,7 @@ void main() {
       expect(sub['fault'], isNot(true));
     });
 
-    test('AC2.2 transport error is rethrown identical, not a TypeError',
-        () async {
+    test('transport error is rethrown identical, not a TypeError', () async {
       final boom = const SocketException('connection refused');
       final client = XRayBaseClient(
         MockClient((_) async => throw boom),

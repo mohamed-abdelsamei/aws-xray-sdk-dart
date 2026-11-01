@@ -72,8 +72,7 @@ void main() {
       expect(ctx.sampled, isTrue);
     });
 
-    test('invalid Root yields a fresh trace and null parentId (AC10.2)',
-        () async {
+    test('invalid Root yields a fresh trace and null parentId', () async {
       final capture = LambdaTraceCapture(
         innerFactory: () =>
             _FakeRuntimeClient('Root=bad;Parent=53995c3f42cd8ad8;Sampled=1'),
@@ -87,8 +86,7 @@ void main() {
       expect(ctx.traceId.toString(), matches(r'^1-[0-9a-f]{8}-[0-9a-f]{24}$'));
     });
 
-    test('malformed Parent under a valid Root yields null parentId (AC10.3)',
-        () async {
+    test('malformed Parent under a valid Root yields null parentId', () async {
       final capture = LambdaTraceCapture(
         innerFactory: () =>
             _FakeRuntimeClient('Root=$traceId;Parent=xyz;Sampled=1'),

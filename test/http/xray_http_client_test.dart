@@ -226,7 +226,7 @@ void main() {
       expect(capturedHeader, contains('Sampled=1'));
     });
 
-    test('AC3.1: recorded url has no userinfo, query, or fragment', () async {
+    test('recorded url has no userinfo, query, or fragment', () async {
       final segment = tracer.beginSegment();
       await tracer.run(segment, () async {
         final client = XRayHttpClient(HttpClient(), tracer);

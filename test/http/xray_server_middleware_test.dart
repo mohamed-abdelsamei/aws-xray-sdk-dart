@@ -89,8 +89,7 @@ void main() {
       expect(seg['parent_id'], '1111aaaa2222bbbb');
     });
 
-    test('invalid Root drops Parent and starts a fresh trace (AC10.2)',
-        () async {
+    test('invalid Root drops Parent and starts a fresh trace', () async {
       await serveAndCapture(
         rate: 1.0,
         requestTraceHeader: 'Root=bad;Parent=53995c3f42cd8ad8',
@@ -101,7 +100,7 @@ void main() {
       expect(seg.containsKey('parent_id'), isFalse);
     });
 
-    test('malformed Parent is omitted under a valid Root (AC10.3)', () async {
+    test('malformed Parent is omitted under a valid Root', () async {
       final upstreamTrace = TraceId.generate();
       await serveAndCapture(
         rate: 1.0,
@@ -113,7 +112,7 @@ void main() {
       expect(seg.containsKey('parent_id'), isFalse);
     });
 
-    test('non-hex Root does not throw AssertionError (AC10.4)', () async {
+    test('non-hex Root does not throw AssertionError', () async {
       // The response trace header is built with asserts on; a non-hex Root
       // that slipped through tryParse used to fail here.
       final header = await serveAndCapture(
@@ -136,7 +135,7 @@ void main() {
       expect(header, contains('Root=$upstreamTrace'));
     });
 
-    test('AC3.1: recorded url has no query string', () async {
+    test('recorded url has no query string', () async {
       await serveAndCapture(
         rate: 1.0,
         path: '/orders?X-Amz-Signature=abc',

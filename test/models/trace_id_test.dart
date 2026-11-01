@@ -23,7 +23,7 @@ void main() {
       expect(TraceId.tryParse('2-abc-def'), isNull);
     });
 
-    test('tryParse returns null for non-hex timestamp or random (AC10.1)', () {
+    test('tryParse returns null for non-hex timestamp or random', () {
       // Right lengths, wrong alphabet: previously accepted, then tripped the
       // buildTraceHeader assert downstream.
       expect(

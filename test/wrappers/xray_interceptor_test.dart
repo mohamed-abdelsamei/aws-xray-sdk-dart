@@ -120,7 +120,7 @@ void main() {
       expect(receivedHeader, contains('Sampled=1'));
     });
 
-    test('AC3.1: recorded url has no userinfo, query, or fragment', () async {
+    test('recorded url has no userinfo, query, or fragment', () async {
       final send = _makeInterceptor(tracer).wrap((_) async => const _Res(200));
 
       final segment = tracer.beginSegment();
@@ -355,7 +355,7 @@ void main() {
       expect(xray?['incomplete'], isNull);
     }
 
-    test('AC1.1 request adapter throws: inner runs once untraced', () async {
+    test('request adapter throws: inner runs once untraced', () async {
       final original = _Req(url: 'https://example.com');
       const result = _Res(200);
       final calls = <_Req>[];
@@ -372,7 +372,7 @@ void main() {
       expect(subs(), isEmpty);
     });
 
-    test('AC1.2 withTraceHeader throws: original request sent, still traced',
+    test('withTraceHeader throws: original request sent, still traced',
         () async {
       final original = _Req(url: 'https://example.com');
       const result = _Res(200);
@@ -393,8 +393,7 @@ void main() {
       expectClosedNotSwept(recorded.single);
     });
 
-    test('AC1.3 response adapter throws: response returned, closed sub',
-        () async {
+    test('response adapter throws: response returned, closed sub', () async {
       const result = _Res(200);
       final send = make(responseThrows: true).wrap((_) async => result);
 
@@ -411,8 +410,7 @@ void main() {
       expect(http?['response'], isNull);
     });
 
-    test('AC1.4 inner error is rethrown identically with its stack trace',
-        () async {
+    test('inner error is rethrown identically with its stack trace', () async {
       final error = StateError('boom');
       final stack = StackTrace.fromString('marker-frame');
       final send =
@@ -434,13 +432,13 @@ void main() {
       expect(sub['fault'], isTrue);
     });
 
-    test('AC1.4 inner error is rethrown even when failure enrichment throws',
+    test('inner error is rethrown even when failure enrichment throws',
         () async {
       final error = _ToStringThrows();
       final send = make().wrap((_) async => throw error);
 
       // Caught inside the trace so the root segment does not record it too
-      // (root-level toString guarding is T11's scope).
+      // (root-level toString guarding is covered in cause_test.dart).
       Object? caught;
       await traced(() async {
         try {

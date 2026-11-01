@@ -50,7 +50,7 @@ class _ThrowingPacketSender extends Sender {
   Future<void> close() async {}
 }
 
-// A custom sender that implements only send/close (AC9.1).
+// A custom sender that implements only send/close.
 class _SendOnlySender extends Sender {
   @override
   Future<void> send(Segment segment) async {}
@@ -475,7 +475,7 @@ void main() {
     });
   });
 
-  group('XRayTracer.runLambda — custom senders (AC9)', () {
+  group('XRayTracer.runLambda — custom senders', () {
     test('a send-only custom Sender reports UnsupportedError via onSendError',
         () async {
       final errors = <Object>[];

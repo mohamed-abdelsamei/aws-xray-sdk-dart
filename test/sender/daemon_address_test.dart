@@ -5,7 +5,7 @@ import 'package:test/test.dart';
 
 void main() {
   group('parseDaemonAddress', () {
-    group('valid input (AC8.1)', () {
+    group('valid input', () {
       const cases = <String?, (String, int)>{
         '127.0.0.1:2000': ('127.0.0.1', 2000),
         'xray:3000': ('xray', 3000),
@@ -29,7 +29,7 @@ void main() {
       }
     });
 
-    group('malformed input falls back to 127.0.0.1:2000 (AC8.2)', () {
+    group('malformed input falls back to 127.0.0.1:2000', () {
       const cases = <String>[
         'abc:notaport',
         'tcp:1.2.3.4:2000',

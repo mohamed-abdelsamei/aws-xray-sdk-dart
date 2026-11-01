@@ -101,7 +101,7 @@ void main() {
       expect(exc['message'], '_ThrowingToString');
     });
 
-    test('AC7.1: 400 records error, no fault, http.response.status', () async {
+    test('400 records error, no fault, http.response.status', () async {
       final sub =
           await failWith(const _HttpError(400), errorStatus: _statusHook);
       expect(sub['error'], isTrue);
@@ -112,7 +112,7 @@ void main() {
       expect((sub['http'] as Map)['request'], isNotNull);
     });
 
-    test('AC7.1: rethrown error keeps its stack trace', () async {
+    test('rethrown error keeps its stack trace', () async {
       final trace = StackTrace.current;
       final send = XRayInterceptor<Object, Object>(
         tracer: tracer,
@@ -131,7 +131,7 @@ void main() {
       expect(got.toString(), contains(trace.toString().split('\n').first));
     });
 
-    test('AC7.2: 429 records throttle and error', () async {
+    test('429 records throttle and error', () async {
       final sub =
           await failWith(const _HttpError(429), errorStatus: _statusHook);
       expect(sub['throttle'], isTrue);
@@ -140,7 +140,7 @@ void main() {
       expect(status(sub), 429);
     });
 
-    test('AC7.2: 503 records fault', () async {
+    test('503 records fault', () async {
       final sub =
           await failWith(const _HttpError(503), errorStatus: _statusHook);
       expect(sub['fault'], isTrue);
@@ -158,14 +158,14 @@ void main() {
       expect(status(sub), 400);
     });
 
-    test('AC7.3: no hook keeps fault', () async {
+    test('no hook keeps fault', () async {
       final sub = await failWith(const _HttpError(400));
       expect(sub['fault'], isTrue);
       expect(sub.containsKey('error'), isFalse);
       expect(status(sub), isNull);
     });
 
-    test('AC7.3: hook returning null keeps fault', () async {
+    test('hook returning null keeps fault', () async {
       final sub =
           await failWith(const _HttpError(400), errorStatus: (_) => null);
       expect(sub['fault'], isTrue);
@@ -173,7 +173,7 @@ void main() {
       expect(status(sub), isNull);
     });
 
-    test('AC7.3: throwing hook (Exception and Error) keeps fault', () async {
+    test('throwing hook (Exception and Error) keeps fault', () async {
       for (final Object thrown in [StateError('boom'), Exception('boom')]) {
         sender.clear();
         final sub = await failWith(const _HttpError(400),
@@ -184,7 +184,7 @@ void main() {
       }
     });
 
-    test('AC7.3: null hook keeps throttle detection by error code', () async {
+    test('null hook keeps throttle detection by error code', () async {
       final sub = await failWith(const _HttpError(400, 'ThrottlingException'),
           errorStatus: (_) => null);
       expect(sub['throttle'], isTrue);
@@ -203,7 +203,7 @@ void main() {
   group('errorStatus via XRay.registerClient / fromClient', () {
     tearDown(() => clientRegistry.remove(_Client));
 
-    test('AC7.1 end-to-end: thrown 404 is an error, not a fault', () async {
+    test('thrown 404 is an error, not a fault', () async {
       XRay.registerClient<_Client>(
         requestAdapter: _req,
         responseAdapter: _res,

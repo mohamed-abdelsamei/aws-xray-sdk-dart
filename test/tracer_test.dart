@@ -406,7 +406,7 @@ void main() {
       expect(sender.last.containsKey('parent_id'), isFalse);
     });
 
-    test('malformed Parent under a valid Root is omitted (AC10.3)', () async {
+    test('malformed Parent under a valid Root is omitted', () async {
       final upstream = TraceId.generate();
       await tracer.trace('op', () async {},
           traceHeader: 'Root=$upstream;Parent=xyz;Sampled=1');
@@ -415,8 +415,7 @@ void main() {
       expect(sender.last.containsKey('parent_id'), isFalse);
     });
 
-    test('malformed headers never raise AssertionError downstream (AC10.4)',
-        () async {
+    test('malformed headers never raise AssertionError downstream', () async {
       // Each header is continued into a traced outbound call, which builds an
       // X-Amzn-Trace-Id with asserts enabled.
       final headers = [

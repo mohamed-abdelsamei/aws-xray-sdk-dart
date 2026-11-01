@@ -8,7 +8,7 @@ class _ThrowingToString implements Exception {
 
 void main() {
   test(
-      'AC3.4: error with throwing toString escapes run unchanged and the '
+      'error with throwing toString escapes run unchanged and the '
       'segment is still sent with a fault and fallback message', () async {
     final sender = InMemorySender();
     final tracer = XRayTracer(

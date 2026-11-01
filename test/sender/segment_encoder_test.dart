@@ -216,14 +216,14 @@ void main() {
     });
   });
 
-  group('segment_encoder — unencodable metadata (AC5)', () {
+  group('segment_encoder — unencodable metadata', () {
     Map<String, Object?> body(List<int> payload) {
       final text = utf8.decode(payload);
       return jsonDecode(text.substring(text.indexOf('\n') + 1))
           as Map<String, Object?>;
     }
 
-    test('AC5.1: DateTime, NaN, toJson() and plain objects encode', () {
+    test('DateTime, NaN, toJson() and plain objects encode', () {
       final when = DateTime.utc(2026, 1, 2, 3, 4, 5);
       final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
           .annotate('k', 'v')
@@ -259,7 +259,7 @@ void main() {
       expect(doc['annotations'], {'k': 'v'});
     });
 
-    test('AC5.1: toJson() Map with non-String keys falls back to toString', () {
+    test('toJson() Map with non-String keys falls back to toString', () {
       final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
           .addMetadata('x', _IntKeyToJson())
           .close();
@@ -267,7 +267,7 @@ void main() {
       expect(((doc['metadata'] as Map)['default'] as Map)['x'], 'int-keys');
     });
 
-    test('AC5.2: toJson() and toString() both throw -> placeholder', () {
+    test('toJson() and toString() both throw -> placeholder', () {
       final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
           .addMetadata('x', _Hostile())
           .close();
@@ -276,7 +276,7 @@ void main() {
           '<unencodable:_Hostile>');
     });
 
-    test('AC5.2: unencodable subsegment doc is still emitted', () {
+    test('unencodable subsegment doc is still emitted', () {
       final sub = Subsegment.begin(name: 'h')
           .addMetadata('x', _Hostile())
           .addMetadata('t', DateTime.utc(2026))
@@ -288,8 +288,7 @@ void main() {
       expect(md['t'], DateTime.utc(2026).toString());
     });
 
-    test('AC5.2: runLambda still sends the doc with unencodable metadata',
-        () async {
+    test('runLambda still sends the doc with unencodable metadata', () async {
       final sender = InMemorySender();
       final tracer = XRayTracer(
         serviceName: 'svc',
@@ -318,7 +317,7 @@ void main() {
       });
     });
 
-    test('AC5.3: JSON-native segment bytes match plain jsonEncode', () {
+    test('JSON-native segment bytes match plain jsonEncode', () {
       final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
           .annotate('n', 1.5)
           .addMetadata('m', {
