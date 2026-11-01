@@ -275,4 +275,175 @@ void main() {
       expect(sender.firstSub.containsKey('end_time'), isTrue);
     });
   });
+
+  group('XRayInterceptor containment', () {
+    late InMemorySender mem;
+    late XRayTracer memTracer;
+
+    setUp(() {
+      mem = InMemorySender();
+      memTracer = XRayTracer(
+        serviceName: 'svc',
+        sender: mem,
+        sampling: FixedRateSampler(1.0),
+      );
+    });
+
+    XRayInterceptor<_Req, _Res> make({
+      bool requestThrows = false,
+      bool headerThrows = false,
+      bool responseThrows = false,
+    }) =>
+        XRayInterceptor(
+          tracer: memTracer,
+          namespace: 'remote',
+          extractor: (op, body) => AwsData(operation: op),
+          requestAdapter: (req) {
+            if (requestThrows) throw StateError('request adapter');
+            return (
+              operationName: 'TestOp',
+              method: 'GET',
+              url: req.url,
+              body: const {},
+              withTraceHeader: (r, h) =>
+                  headerThrows ? throw StateError('header') : r.withHeader(h),
+            );
+          },
+          responseAdapter: (res) {
+            if (responseThrows) throw StateError('response adapter');
+            return (
+              statusCode: res.statusCode,
+              contentLength: null,
+              requestId: null,
+              region: null,
+              errorCode: null,
+            );
+          },
+        );
+
+    Future<T> traced<T>(Future<T> Function() fn) =>
+        memTracer.run(memTracer.beginSegment(), fn);
+
+    List<Map<String, Object?>> subs() {
+      final json = jsonDecode(jsonEncode(mem.segments.single.toJson()))
+          as Map<String, Object?>;
+      return [
+        for (final s in json['subsegments'] as List? ?? const [])
+          s as Map<String, Object?>,
+      ];
+    }
+
+    void expectClosedNotSwept(Map<String, Object?> sub) {
+      expect(sub.containsKey('in_progress'), isFalse);
+      expect(sub.containsKey('end_time'), isTrue);
+      final xray = (sub['metadata'] as Map?)?['xray'] as Map?;
+      expect(xray?['incomplete'], isNull);
+    }
+
+    test('AC1.1 request adapter throws: inner runs once untraced', () async {
+      final original = _Req(url: 'https://example.com');
+      const result = _Res(200);
+      final calls = <_Req>[];
+      final send = make(requestThrows: true).wrap((req) async {
+        calls.add(req);
+        return result;
+      });
+
+      final got = await traced(() => send(original));
+
+      expect(identical(got, result), isTrue);
+      expect(calls, hasLength(1));
+      expect(identical(calls.single, original), isTrue);
+      expect(subs(), isEmpty);
+    });
+
+    test('AC1.2 withTraceHeader throws: original request sent, still traced',
+        () async {
+      final original = _Req(url: 'https://example.com');
+      const result = _Res(200);
+      final calls = <_Req>[];
+      final send = make(headerThrows: true).wrap((req) async {
+        calls.add(req);
+        return result;
+      });
+
+      final got = await traced(() => send(original));
+
+      expect(identical(got, result), isTrue);
+      expect(calls, hasLength(1));
+      expect(identical(calls.single, original), isTrue);
+      final recorded = subs();
+      expect(recorded, hasLength(1));
+      expect(recorded.single['name'], 'TestOp');
+      expectClosedNotSwept(recorded.single);
+    });
+
+    test('AC1.3 response adapter throws: response returned, closed sub',
+        () async {
+      const result = _Res(200);
+      final send = make(responseThrows: true).wrap((_) async => result);
+
+      final got = await traced(() => send(_Req(url: 'https://example.com')));
+
+      expect(identical(got, result), isTrue);
+      final recorded = subs();
+      expect(recorded, hasLength(1));
+      final sub = recorded.single;
+      expectClosedNotSwept(sub);
+      expect(sub['fault'], isNull);
+      expect(sub['error'], isNull);
+      final http = sub['http'] as Map?;
+      expect(http?['response'], isNull);
+    });
+
+    test('AC1.4 inner error is rethrown identically with its stack trace',
+        () async {
+      final error = StateError('boom');
+      final stack = StackTrace.fromString('marker-frame');
+      final send =
+          make().wrap((_) async => Error.throwWithStackTrace(error, stack));
+
+      Object? caught;
+      StackTrace? caughtStack;
+      try {
+        await traced(() => send(_Req(url: 'https://example.com')));
+      } catch (e, st) {
+        caught = e;
+        caughtStack = st;
+      }
+
+      expect(identical(caught, error), isTrue);
+      expect(caughtStack.toString(), contains('marker-frame'));
+      final sub = subs().single;
+      expectClosedNotSwept(sub);
+      expect(sub['fault'], isTrue);
+    });
+
+    test('AC1.4 inner error is rethrown even when failure enrichment throws',
+        () async {
+      final error = _ToStringThrows();
+      final send = make().wrap((_) async => throw error);
+
+      // Caught inside the trace so the root segment does not record it too
+      // (root-level toString guarding is T11's scope).
+      Object? caught;
+      await traced(() async {
+        try {
+          await send(_Req(url: 'https://example.com'));
+        } catch (e) {
+          caught = e;
+        }
+      });
+
+      expect(identical(caught, error), isTrue);
+      final sub = subs().single;
+      expectClosedNotSwept(sub);
+      expect(sub['fault'], isTrue);
+    });
+  });
+}
+
+final class _ToStringThrows implements Exception {
+  @override
+  String toString() => throw StateError('toString');
 }

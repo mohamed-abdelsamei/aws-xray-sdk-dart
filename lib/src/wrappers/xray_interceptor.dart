@@ -1,6 +1,7 @@
 import '../models/aws_data.dart';
 import '../models/cause.dart';
 import '../models/http_data.dart';
+import '../models/subsegment.dart';
 import '../aws/region.dart';
 import '../aws/throttle_codes.dart';
 import '../models/trace_header.dart';
@@ -60,23 +61,39 @@ final class XRayInterceptor<Req, Res> {
   final SmithyResponseAdapter<Res> Function(Res) _responseAdapter;
 
   /// Returns a new send function that wraps [inner] with tracing.
+  ///
+  /// Tracing never faults the call: if a user adapter or subsegment enrichment
+  /// throws, the request is still sent and its response (or [inner]'s own
+  /// error, unchanged) is what the caller sees.
   SendFn<Req, Res> wrap(SendFn<Req, Res> inner) => (request) async {
         final segment = _tracer.currentSegment;
         if (segment == null) return inner(request);
 
-        final adapted = _requestAdapter(request);
+        final SmithyRequestAdapter<Req> adapted;
+        try {
+          adapted = _requestAdapter(request);
+        } catch (_) {
+          // No operation name to trace under: send untraced.
+          return inner(request);
+        }
         var sub = _tracer.beginSubsegment(
           adapted.operationName,
           namespace: _namespace,
         );
 
         // Inject trace header using the sampling decision stored in the zone.
-        final traceHeader = buildTraceHeader(
-          traceId: segment.traceId.toString(),
-          segmentId: sub.id,
-          sampled: _tracer.isSampled,
-        );
-        final tracedRequest = adapted.withTraceHeader(request, traceHeader);
+        // If injection fails, send the original request (still traced).
+        Req tracedRequest;
+        try {
+          final traceHeader = buildTraceHeader(
+            traceId: segment.traceId.toString(),
+            segmentId: sub.id,
+            sampled: _tracer.isSampled,
+          );
+          tracedRequest = adapted.withTraceHeader(request, traceHeader);
+        } catch (_) {
+          tracedRequest = request;
+        }
 
         AwsData awsData;
         try {
@@ -85,15 +102,40 @@ final class XRayInterceptor<Req, Res> {
           awsData = AwsData(operation: adapted.operationName);
         }
 
+        final requestOnly = HttpData(
+          request: HttpRequestData(
+            method: adapted.method,
+            url: adapted.url,
+            traced: true,
+          ),
+        );
+
+        final Res response;
         try {
           // Suppress the global dart:io patch for the inner send so a patched
           // HttpClient underneath the Smithy transport does not trace this same
           // request again as a bare host-named subsegment.
-          final response =
-              await runWithoutDartIoTracing(() => inner(tracedRequest));
-          final resAdapted = _responseAdapter(response);
+          response = await runWithoutDartIoTracing(() => inner(tracedRequest));
+        } catch (e) {
+          try {
+            final failed = sub.withHttp(requestOnly).withAws(awsData);
+            if (isThrottleErrorCode(e.runtimeType.toString()) ||
+                isThrottleErrorCode(e.toString())) {
+              _tracer.endSubsegment(failed.withThrottle().withCause(Cause(
+                    exceptions: [XRayException.from(e)],
+                  )));
+            } else {
+              _tracer.failSubsegment(failed, e);
+            }
+          } catch (_) {
+            _endQuietly(sub.withFault());
+          }
+          rethrow;
+        }
 
-          sub = sub
+        try {
+          final resAdapted = _responseAdapter(response);
+          var done = sub
               .withHttpCall(
                 method: adapted.method,
                 url: adapted.url,
@@ -114,31 +156,24 @@ final class XRayInterceptor<Req, Res> {
               ));
           if (resAdapted.errorCode != null &&
               isThrottleErrorCode(resAdapted.errorCode!)) {
-            sub = sub.withThrottle();
+            done = done.withThrottle();
           }
-
-          _tracer.endSubsegment(sub);
-          return response;
-        } catch (e) {
-          var failed = sub
-              .withHttp(HttpData(
-                request: HttpRequestData(
-                  method: adapted.method,
-                  url: adapted.url,
-                  traced: true,
-                ),
-              ))
-              .withAws(awsData);
-          if (isThrottleErrorCode(e.runtimeType.toString()) ||
-              isThrottleErrorCode(e.toString())) {
-            failed = failed.withThrottle();
-            _tracer.endSubsegment(failed.withCause(Cause(exceptions: [
-              XRayException.from(e),
-            ])));
-          } else {
-            _tracer.failSubsegment(failed, e);
+          _tracer.endSubsegment(done);
+        } catch (_) {
+          // Close without response data rather than fault a successful call.
+          try {
+            _tracer.endSubsegment(sub.withHttp(requestOnly).withAws(awsData));
+          } catch (_) {
+            _endQuietly(sub);
           }
-          rethrow;
         }
+        return response;
       };
+
+  /// Last-resort close of the bare [sub] so it is never left pending.
+  void _endQuietly(Subsegment sub) {
+    try {
+      _tracer.endSubsegment(sub);
+    } catch (_) {}
+  }
 }

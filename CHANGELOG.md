@@ -31,6 +31,13 @@
   throw, so the segment was lost. Such values now fall back to `toJson()`, then
   `toString()`, then the placeholder `"<unencodable:Type>"`. Documents with only
   JSON-native values encode byte for byte as before.
+- **A throwing Smithy adapter no longer breaks the AWS call.** In
+  `XRay.fromClient` clients, a `requestAdapter` that throws now sends the call
+  untraced. A `withTraceHeader` that throws sends the original request, still
+  traced. A `responseAdapter` that throws after a successful call returns the
+  response and closes the subsegment without response data. Only the
+  transport's own error reaches the caller, as the same object with its
+  original stack trace.
 
 ## 0.4.1
 
