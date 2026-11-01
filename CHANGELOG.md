@@ -26,6 +26,11 @@
   `handleTraced`, `tracer.trace()` and `LambdaTraceCapture.context()` drop
   `Parent` when the `Root` is invalid (a fresh trace is started) or the parent
   is not 16 hex characters.
+- **One unencodable metadata value no longer drops the whole segment.** A
+  `DateTime`, custom object, or `NaN`/`Infinity` in metadata made `jsonEncode`
+  throw, so the segment was lost. Such values now fall back to `toJson()`, then
+  `toString()`, then the placeholder `"<unencodable:Type>"`. Documents with only
+  JSON-native values encode byte for byte as before.
 
 ## 0.4.1
 

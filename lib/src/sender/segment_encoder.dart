@@ -104,6 +104,44 @@ List<int> encodeSubsegmentDoc(
     });
 
 List<int> _encodeOne(Map<String, Object?> doc) {
-  final json = jsonEncode(doc);
+  final json = jsonEncode(doc, toEncodable: _fallbackEncodable);
   return utf8.encode('$_header\n$json');
+}
+
+/// Last-resort conversion for values `jsonEncode` cannot handle natively —
+/// e.g. a `DateTime` or custom object in metadata, or a non-finite double.
+///
+/// Only invoked for values that would otherwise throw, so JSON-native
+/// documents encode byte-for-byte as before. Tries `toJson()` (via a dynamic
+/// call — no mirrors, AOT-safe), then `toString()`, then a fixed placeholder,
+/// so one bad value never drops the whole segment.
+Object? _fallbackEncodable(Object? value) {
+  // Non-finite doubles (NaN, ±Infinity) have no toJson(); skip straight to
+  // their string form ("NaN", "Infinity", "-Infinity").
+  if (value is! num) {
+    try {
+      final Object? json = (value as dynamic).toJson();
+      // jsonEncode does not re-apply toEncodable to this result's top level,
+      // so only accept something it can write (nested values still fall back).
+      if (json == null ||
+          json is bool ||
+          json is String ||
+          (json is num && json.isFinite) ||
+          json is List ||
+          (json is Map && json.keys.every((k) => k is String))) {
+        return json;
+      }
+    } catch (_) {
+      // No toJson(), or it threw — fall through.
+    }
+  }
+  try {
+    return value.toString();
+  } catch (_) {
+    try {
+      return '<unencodable:${value.runtimeType}>';
+    } catch (_) {
+      return '<unencodable>';
+    }
+  }
 }

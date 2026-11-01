@@ -215,4 +215,149 @@ void main() {
       );
     });
   });
+
+  group('segment_encoder — unencodable metadata (AC5)', () {
+    Map<String, Object?> body(List<int> payload) {
+      final text = utf8.decode(payload);
+      return jsonDecode(text.substring(text.indexOf('\n') + 1))
+          as Map<String, Object?>;
+    }
+
+    test('AC5.1: DateTime, NaN, toJson() and plain objects encode', () {
+      final when = DateTime.utc(2026, 1, 2, 3, 4, 5);
+      final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
+          .annotate('k', 'v')
+          .addMetadata('when', when)
+          .addMetadata('nan', double.nan)
+          .addMetadata('inf', double.negativeInfinity)
+          .addMetadata('json', _WithToJson())
+          .addMetadata('plain', _Plain())
+          .addMetadata('bad_to_json', _BadToJson())
+          .addMetadata('nested', {
+        'list': [when, 1]
+      }).close();
+
+      late List<List<int>> payloads;
+      expect(() => payloads = enc.encode(segment), returnsNormally);
+      expect(payloads, hasLength(1));
+      final doc = body(payloads.single);
+      final md = (doc['metadata'] as Map)['default'] as Map;
+      expect(md['when'], when.toString());
+      expect(md['nan'], 'NaN');
+      expect(md['inf'], '-Infinity');
+      expect(md['json'], {'a': 1});
+      expect(md['plain'], 'plain!');
+      // toJson() returned a non-JSON value -> falls back to toString().
+      expect(md['bad_to_json'], 'bad-to-json');
+      expect(md['nested'], {
+        'list': [when.toString(), 1]
+      });
+      // Other fields unchanged.
+      expect(doc['name'], 'svc');
+      expect(doc['id'], segment.id);
+      expect(doc['trace_id'], segment.traceId.toString());
+      expect(doc['annotations'], {'k': 'v'});
+    });
+
+    test('AC5.1: toJson() Map with non-String keys falls back to toString', () {
+      final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
+          .addMetadata('x', _IntKeyToJson())
+          .close();
+      final doc = body(enc.encode(segment).single);
+      expect(((doc['metadata'] as Map)['default'] as Map)['x'], 'int-keys');
+    });
+
+    test('AC5.2: toJson() and toString() both throw -> placeholder', () {
+      final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
+          .addMetadata('x', _Hostile())
+          .close();
+      final doc = body(enc.encode(segment).single);
+      expect(((doc['metadata'] as Map)['default'] as Map)['x'],
+          '<unencodable:_Hostile>');
+    });
+
+    test('AC5.2: unencodable subsegment doc is still emitted', () {
+      final sub = Subsegment.begin(name: 'h')
+          .addMetadata('x', _Hostile())
+          .addMetadata('t', DateTime.utc(2026))
+          .close();
+      final docs = enc.encodeSubsegmentDocs(sub, 'abcdef1234567890', 't');
+      expect(docs, hasLength(1));
+      final md = (body(docs.single)['metadata'] as Map)['default'] as Map;
+      expect(md['x'], '<unencodable:_Hostile>');
+      expect(md['t'], DateTime.utc(2026).toString());
+    });
+
+    test('AC5.2: runLambda still sends the doc with unencodable metadata',
+        () async {
+      final sender = InMemorySender();
+      final tracer = XRayTracer(
+        serviceName: 'svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+      );
+      final result = await tracer.runLambda(
+        TraceId.generate(),
+        'abcdef1234567890',
+        'handler',
+        () async {
+          tracer.addMetadata('when', DateTime.utc(2026));
+          tracer.addMetadata('x', _Hostile());
+          tracer.addMetadata('nan', double.nan);
+          return 42;
+        },
+      );
+      expect(result, 42);
+      expect(sender.packets, hasLength(1));
+      final md =
+          (body(sender.packets.single)['metadata'] as Map)['default'] as Map;
+      expect(md, {
+        'when': DateTime.utc(2026).toString(),
+        'x': '<unencodable:_Hostile>',
+        'nan': 'NaN',
+      });
+    });
+
+    test('AC5.3: JSON-native segment bytes match plain jsonEncode', () {
+      final segment = Segment.begin(name: 'svc', traceId: TraceId.generate())
+          .annotate('n', 1.5)
+          .addMetadata('m', {
+            'a': [1, 'two', true, null],
+            'b': {'c': -0.25},
+          })
+          .addSubsegment(Subsegment.begin(name: 'op', namespace: 'aws').close())
+          .close();
+      final expected = utf8.encode(
+        '{"format":"json","version":1}\n${jsonEncode(segment.toJson())}',
+      );
+      expect(enc.encode(segment).single, expected);
+    });
+  });
+}
+
+class _WithToJson {
+  Map<String, Object> toJson() => {'a': 1};
+}
+
+class _Plain {
+  @override
+  String toString() => 'plain!';
+}
+
+class _BadToJson {
+  DateTime toJson() => DateTime.utc(2026);
+  @override
+  String toString() => 'bad-to-json';
+}
+
+class _Hostile {
+  Object toJson() => throw StateError('no json');
+  @override
+  String toString() => throw StateError('no string');
+}
+
+class _IntKeyToJson {
+  Map<Object, Object> toJson() => {1: 'a'};
+  @override
+  String toString() => 'int-keys';
 }
