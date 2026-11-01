@@ -52,3 +52,4 @@ cdk.out/
 
 # Repo-only agent context
 CLAUDE.md
+AGENT.md
