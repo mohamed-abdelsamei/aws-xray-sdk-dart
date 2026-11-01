@@ -626,6 +626,30 @@ appearing in the X-Ray console, work down this list:
 Delivery can only be confirmed at the daemon or the X-Ray console — not from
 inside the process.
 
+### Diagnostics hook
+
+Some problems are contained so tracing never breaks your app, and would
+otherwise leave no signal. Pass `onDiagnostic` to `XRayTracer` (or
+`XRay.configure`) to hear about them:
+
+```dart
+XRay.configure(
+  onDiagnostic: (d) => log.warning('xray ${d.code}: ${d.message}', d.error),
+  onSendError: (segment, error) => log.warning('xray send failed', error),
+);
+```
+
+`XRayDiagnostic.code` is a stable string, not an enum, so new codes can appear
+in any release. Codes in use: `node_trimmed` (a single segment or subsegment
+was too large for one datagram and its metadata was shortened or dropped).
+The hook is synchronous: it must not throw and must not be `async`. While
+any tracer's hook is running, diagnostics raised on the same call stack (by any
+tracer) are ignored. A custom sender that encodes outside its send call will not
+report `node_trimmed`. It can fire often, so
+rate-limit inside the callback. It does not receive send failures; those go to
+`onSendError`. `XRay.configure` also accepts `onSendError` and `onSampledDrop`;
+all three are ignored when you pass a prebuilt `tracer:`.
+
 ---
 
 ## Segment document schema

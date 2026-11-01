@@ -446,6 +446,27 @@ marker cannot be used as a filter in X-Ray. Code that reads the document back
 will see a string where a metadata value used to be. The macOS local limit
 (9216 bytes by default) is separate and still applies in local development.
 
+## Diagnostics Hook
+
+`XRayTracer(onDiagnostic:)` (also accepted by `XRay.configure`) receives an
+`XRayDiagnostic` for contained, non-segment problems. The fields are `code`,
+`message`, and, when there is a failure, `error` and `stackTrace`. Only the SDK
+creates diagnostics. Codes are stable strings, not an enum, and new ones may be
+added in any release.
+
+- `node_trimmed`: the encoder shortened a node's metadata or reduced it to a
+  bare node (see "Oversized single nodes"). It is reported on both the `run()`
+  and `runLambda()` paths, through senders that encode (`UdpSender`). A node
+  that fits produces nothing.
+- The hook is synchronous and best-effort. A throwing callback is ignored; an
+  `async` callback's late failure is swallowed (but hooks must still be
+  synchronous). While any
+  tracer's hook is running, a diagnostic raised on the same call stack (by any
+  tracer) is ignored. A custom sender that encodes outside its send call (in a
+  different zone) will not report `node_trimmed`.
+- Send failures are not diagnostics; they go to `onSendError` only.
+- With no callback set, behaviour is unchanged and nothing is printed.
+
 ## Supported Runtimes And Scope
 
 - Supported: Dart VM server applications and Lambda custom runtimes.

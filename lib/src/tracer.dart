@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'diagnostic.dart';
 import 'models/http_data.dart';
 import 'models/segment.dart';
 import 'models/subsegment.dart';
@@ -14,6 +15,36 @@ import 'sender/udp_sender.dart';
 import 'context/trace_scope.dart';
 
 export 'context/trace_scope.dart' show TraceContext;
+
+// True while an onDiagnostic hook is running, so a diagnostic raised from
+// inside the hook (on the same call stack) is ignored instead of looping.
+bool _inDiagnosticHook = false;
+
+/// Internal dispatcher, hidden from the package barrel: delivers a diagnostic
+/// to [tracer]'s `onDiagnostic` hook, if any. Never throws; a diagnostic
+/// raised while the hook is already running is ignored.
+void reportDiagnostic(
+  XRayTracer tracer,
+  String code,
+  String message, {
+  Object? error,
+  StackTrace? stackTrace,
+}) {
+  final hook = tracer.onDiagnostic;
+  if (hook == null || _inDiagnosticHook) return;
+  _inDiagnosticHook = true;
+  try {
+    XRayTracer._safeNotify(() {
+      final Object? result = (hook as dynamic)(createDiagnostic(code, message,
+          error: error, stackTrace: stackTrace));
+      // An async closure passed despite the docs: swallow its late failure so
+      // it cannot become an unhandled error and crash the process.
+      if (result is Future) result.then<void>((_) {}, onError: (_) {});
+    });
+  } finally {
+    _inDiagnosticHook = false;
+  }
+}
 
 // Zone key for the active segment.
 final _zoneKey = #_xraySegment;
@@ -56,6 +87,7 @@ XRayTracer newTracerWithUdpSeamsForTesting({
   int daemonPort = 2000,
   void Function(Segment segment)? onSampledDrop,
   void Function(Segment segment, Object error)? onSendError,
+  void Function(XRayDiagnostic diagnostic)? onDiagnostic,
   Future<InternetAddress> Function(String host)? resolver,
   Future<RawDatagramSocket> Function(InternetAddressType family)? socketFactory,
 }) =>
@@ -68,6 +100,7 @@ XRayTracer newTracerWithUdpSeamsForTesting({
       daemonPort: daemonPort,
       onSampledDrop: onSampledDrop,
       onSendError: onSendError,
+      onDiagnostic: onDiagnostic,
       resolver: resolver,
       socketFactory: socketFactory,
     );
@@ -125,6 +158,7 @@ final class XRayTracer {
     int daemonPort = 2000,
     void Function(Segment segment)? onSampledDrop,
     void Function(Segment segment, Object error)? onSendError,
+    void Function(XRayDiagnostic diagnostic)? onDiagnostic,
   }) : this._(
           serviceName: serviceName,
           sender: sender,
@@ -134,6 +168,7 @@ final class XRayTracer {
           daemonPort: daemonPort,
           onSampledDrop: onSampledDrop,
           onSendError: onSendError,
+          onDiagnostic: onDiagnostic,
         );
 
   /// The single real-tracer constructor. [resolver] / [socketFactory] are
@@ -148,6 +183,7 @@ final class XRayTracer {
     required int daemonPort,
     required this.onSampledDrop,
     required this.onSendError,
+    required this.onDiagnostic,
     Future<InternetAddress> Function(String host)? resolver,
     Future<RawDatagramSocket> Function(InternetAddressType family)?
         socketFactory,
@@ -173,7 +209,8 @@ final class XRayTracer {
         _sampling = FixedRateSampler(0.0),
         _failOpen = false,
         onSampledDrop = null,
-        onSendError = null;
+        onSendError = null,
+        onDiagnostic = null;
 
   final String serviceName;
 
@@ -190,6 +227,20 @@ final class XRayTracer {
   /// send. The error is still swallowed so tracing never faults the app; this
   /// is the observability hook. Must not throw.
   final void Function(Segment segment, Object error)? onSendError;
+
+  /// Called when the SDK contains a non-segment problem that would otherwise
+  /// leave no signal, such as an oversized node being trimmed to fit a
+  /// datagram. See [XRayDiagnostic] for the documented codes.
+  ///
+  /// The hook is synchronous and best-effort: it must not throw and must not
+  /// be `async` (an async closure's errors are not caught). A throw is
+  /// ignored. It may fire once per request for a systematically broken
+  /// adapter, so rate-limit inside the callback if that matters. While any
+  /// tracer's hook is running, diagnostics raised on the same call stack (by
+  /// this or any other tracer) are ignored. A custom sender that encodes
+  /// outside its send call (in a different zone) will not report trimmed nodes. It does not receive send
+  /// failures; those go to [onSendError].
+  final void Function(XRayDiagnostic diagnostic)? onDiagnostic;
 
   /// How a recorded subsegment with no active trace context is handled.
   ///
@@ -659,7 +710,10 @@ final class XRayTracer {
   ) async {
     final report = _SendReport(segment, onSendError);
     try {
-      await runZoned(send, zoneValues: {_sendReportKey: report});
+      await runZoned(send, zoneValues: {
+        _sendReportKey: report,
+        trimReportKey: _reportTrim,
+      });
     } catch (e) {
       // Intentionally ignored — tracing must never break the application — but
       // surfaced via the observability hook so an unintentional drop is not
@@ -667,6 +721,18 @@ final class XRayTracer {
       report.notify(e);
     }
   }
+
+  /// Reports an encoder trim (see `trimReportKey`) as a `node_trimmed`
+  /// diagnostic.
+  void _reportTrim(String name, int replaced, bool bare) => reportDiagnostic(
+        this,
+        'node_trimmed',
+        bare
+            ? 'node "$name" was too large for one datagram and was reduced to '
+                'a bare node'
+            : 'node "$name" was too large for one datagram; $replaced '
+                'metadata value(s) replaced with a size marker',
+      );
 
   /// `onError` for the tracer-built [UdpSender]: routes a contained transport
   /// failure to the [_SendReport] of the send in progress, if any. Static so

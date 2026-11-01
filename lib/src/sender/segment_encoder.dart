@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import '../models/segment.dart';
 import '../models/subsegment.dart';
@@ -10,6 +11,23 @@ import '../models/subsegment.dart';
 /// subsegment documents.
 const _maxUdpBytes = 65507;
 const _header = '{"format":"json","version":1}';
+
+/// Zone key under which a caller may install a
+/// `void Function(String name, int replaced, bool bare)` to be told when a node
+/// is trimmed (see [encode]). Internal; not part of the public API. This key is
+/// the contract between this file and `tracer.dart`: the tracer installs the
+/// callback, the encoder calls it. The callback is looked up in the zone that
+/// is current when the encoder runs, so an encode done outside the send call
+/// reports nothing.
+final trimReportKey = #_xrayTrimReport;
+
+void _reportTrim(Object? name, int replaced, bool bare) {
+  final report = Zone.current[trimReportKey];
+  if (report is! void Function(String, int, bool)) return;
+  try {
+    report(_capName(name), replaced, bare);
+  } catch (_) {/* reporting must never break encoding */}
+}
 
 /// Encodes a [Segment] into one or more UDP payloads, each ≤ 65507 bytes.
 ///
@@ -187,6 +205,7 @@ List<int> _fitNode(
           lo = mid + 1;
         }
       }
+      _reportTrim(node['name'], lo, false);
       return attempt(lo);
     }
   }
@@ -196,6 +215,7 @@ List<int> _fitNode(
     for (final k in _structuralKeys)
       if (node.containsKey(k)) k: node[k],
   };
+  _reportTrim(node['name'], 0, true);
   bare['name'] = _capName(node['name']);
   final ns = node['namespace'];
   if (ns == 'aws' || ns == 'remote') bare['namespace'] = ns;

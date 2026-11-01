@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'http/xray_base_client.dart';
 import 'http/xray_http_overrides.dart';
 import 'lambda/lambda_trace_capture.dart';
+import 'diagnostic.dart';
 import 'models/segment.dart';
 import 'sampling/sampling_strategy.dart';
 import 'sender/daemon_address.dart';
@@ -133,11 +134,17 @@ abstract final class XRay {
   ///  * `AWS_LAMBDA_FUNCTION_NAME` → default service name.
   ///
   /// Explicit [serviceName], [sampling], or a fully built [tracer] override the
-  /// environment. Pass [patchDartIoHttp] = false to skip the global HTTP patch.
+  /// environment. [onSendError], [onSampledDrop] and [onDiagnostic] are passed
+  /// to the tracer built here (see [XRayTracer] for their contracts); like
+  /// [serviceName] and [sampling] they are ignored when [tracer] is supplied.
+  /// Pass [patchDartIoHttp] = false to skip the global HTTP patch.
   static XRayTracer configure({
     XRayTracer? tracer,
     String? serviceName,
     SamplingStrategy? sampling,
+    void Function(Segment segment, Object error)? onSendError,
+    void Function(Segment segment)? onSampledDrop,
+    void Function(XRayDiagnostic diagnostic)? onDiagnostic,
     bool fromEnv = true,
     bool patchDartIoHttp = true,
   }) {
@@ -155,6 +162,9 @@ abstract final class XRay {
           sampling: sampling,
           daemonHost: host,
           daemonPort: port,
+          onSendError: onSendError,
+          onSampledDrop: onSampledDrop,
+          onDiagnostic: onDiagnostic,
         );
 
     defaultTracer = built;
