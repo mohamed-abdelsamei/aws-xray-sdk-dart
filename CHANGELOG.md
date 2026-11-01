@@ -11,6 +11,11 @@
   document is emitted without its children, and each child becomes its own
   subsegment document linked by `parent_id`. Small documents are unchanged,
   byte for byte.
+- **`AWS_XRAY_DAEMON_ADDRESS` parsing is stricter and broader.** `configure`
+  now understands `[v6]:port`, bare IPv6 literals (`::1`), and the dual
+  `tcp:h:p udp:h:p` form in either order (the `udp:` address is used).
+  Malformed values (bad or out-of-range port, empty host, `tcp:`-only) fall
+  back to `127.0.0.1:2000` instead of producing a half-parsed address.
 
 ## 0.4.1
 
