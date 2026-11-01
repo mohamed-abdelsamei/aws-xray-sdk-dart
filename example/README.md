@@ -18,7 +18,7 @@ sender:
 - **`NoopSender`** (`advanced_tracing`, `error_handling`, `manual_instrumentation`,
   `sampling_strategies`, `zero_config`, `lambda_runtime`) — discards segments.
 - **`UdpSender`** (`basic_usage`, `http_tracing`, `package_http_tracing`,
-  `server_middleware`) — fires to `127.0.0.1:2000`. With no daemon listening the
+  `server_middleware`, `diagnostics_example`) — fires to `127.0.0.1:2000`. With no daemon listening the
   datagram is silently dropped, so the program still exits cleanly; start the
   daemon below to actually see the traces.
 - **`InMemorySender`** (`aws_sdk_tracing`) — captures segments so the example can
@@ -217,6 +217,19 @@ AWS::Lambda (facade)                    [auto]
 
 ```bash
 dart run example/lambda_runtime.dart
+```
+
+### 10. [diagnostics_example.dart](diagnostics_example.dart)
+
+Hearing about problems the SDK contains instead of throwing.  Wires
+`onDiagnostic`, `onSendError` and `onSampledDrop` through `XRay.configure`, then
+triggers a `node_trimmed` diagnostic (a ~100 KB metadata value that cannot fit
+one UDP datagram), an unsampled drop, and an `adapter_failed` diagnostic (a
+throwing `requestAdapter`), printing each.  Needs no daemon: the trimmed
+segment goes to the default `UdpSender`, which is fire-and-forget.
+
+```bash
+dart run example/diagnostics_example.dart
 ```
 
 ---
