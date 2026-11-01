@@ -37,11 +37,14 @@
   `XRay.configure` used to fall back to `127.0.0.1:2000` with no signal. It now
   reports once per install: as a `daemon_address_invalid` diagnostic when you
   pass `onDiagnostic`, otherwise as one line on `stderr` (the value is
-  sanitized: URLs redacted, control characters replaced, shortened to about
-  100 characters). A second `configure` is a no-op; `XRay.reset()` then
+  sanitized: URLs redacted, control and format characters replaced, shortened
+  to about 100 characters; scheme-less userinfo such as `user:pw@host:badport`
+  is not masked). A TCP-only value such as `tcp:127.0.0.1:2000` counts as
+  malformed, so Lambda users with such a value will see the line after
+  upgrading. A second `configure` is a no-op; `XRay.reset()` then
   `configure` reports again. Unset or empty values never report, and nothing
   is reported when you supply `tracer:`. The fallback itself is unchanged.
-  This is the only case where the SDK prints without a callback.
+  This is the only such line that fires at configure time.
 
 ## 0.5.1
 

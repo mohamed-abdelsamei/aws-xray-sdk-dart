@@ -108,6 +108,14 @@ void main() {
     expect(diags.single.message, contains('bad'));
   });
 
+  test('line separators and bidi overrides are replaced', () {
+    warn('bad\u2028line\u202Eflip:x', hook: true);
+    final msg = diags.single.message;
+    expect(msg, isNot(contains('\u2028')));
+    expect(msg, isNot(contains('\u202E')));
+    expect(msg, contains('bad line flip'));
+  });
+
   test('credentials in the echoed value are redacted before the cap', () {
     warn('http://user:s3cr3tpass@host/${'p' * 200}', hook: true);
     expect(diags.single.message, isNot(contains('s3cr3t')));

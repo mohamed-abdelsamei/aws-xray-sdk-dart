@@ -1,3 +1,5 @@
+import 'dart:async';
+
 /// A contained, non-segment failure or notable event reported through the
 /// tracer's `onDiagnostic` hook.
 ///
@@ -42,3 +44,39 @@ XRayDiagnostic createDiagnostic(
   StackTrace? stackTrace,
 }) =>
     XRayDiagnostic._(code, message, error, stackTrace);
+
+// True while an onDiagnostic hook is running, so a diagnostic raised from
+// inside the hook (on the same call stack) is ignored instead of looping.
+// Process-wide by design.
+bool _inDiagnosticHook = false;
+
+/// Internal, hidden from the package barrel: delivers a diagnostic to [hook]
+/// (no-op when null). Never throws; a diagnostic raised while a hook is
+/// already running is ignored.
+void deliverDiagnostic(
+  void Function(XRayDiagnostic diagnostic)? hook,
+  String code,
+  String message, {
+  Object? error,
+  StackTrace? stackTrace,
+}) {
+  if (hook == null || _inDiagnosticHook) return;
+  _inDiagnosticHook = true;
+  try {
+    safeNotify(() => hook(
+        createDiagnostic(code, message, error: error, stackTrace: stackTrace)));
+  } finally {
+    _inDiagnosticHook = false;
+  }
+}
+
+/// Internal, hidden from the package barrel: runs an observability callback,
+/// swallowing a synchronous throw and, if the callback returned a [Future]
+/// despite the docs (an `async` closure), its late failure too, so a
+/// misbehaving hook can never fault the traced operation or crash the process.
+void safeNotify(Function notify) {
+  try {
+    final Object? result = notify();
+    if (result is Future) result.then<void>((_) {}, onError: (_) {});
+  } catch (_) {/* a hook must never break tracing */}
+}

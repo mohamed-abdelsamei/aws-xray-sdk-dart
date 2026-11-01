@@ -3,7 +3,6 @@ import 'dart:io';
 
 import '../diagnostic.dart';
 import '../models/http_data.dart' show redactUrlsInText;
-import '../tracer.dart' show deliverDiagnostic;
 import 'daemon_address.dart';
 
 /// Warns once when [raw] (the `AWS_XRAY_DAEMON_ADDRESS` value) is set but
@@ -33,12 +32,12 @@ void warnIfDaemonAddressInvalid(
 }
 
 /// Makes [raw] safe to echo on one line: URLs inside it are redacted first
-/// (so a credential is never cut mid-way by the cap), control characters
-/// become spaces, and the result is capped at 100 UTF-16 code units without
+/// (so a credential is never cut mid-way by the cap), control and format
+/// characters (including line separators and bidi overrides) become spaces, and the result is capped at 100 UTF-16 code units without
 /// splitting a surrogate pair.
 String _sanitize(String raw) {
   final clean = redactUrlsInText(raw.trim())
-      .replaceAll(RegExp(r'\p{Cc}', unicode: true), ' ');
+      .replaceAll(RegExp(r'[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]', unicode: true), ' ');
   if (clean.length <= 100) return clean;
   var end = 100;
   final last = clean.codeUnitAt(end - 1);

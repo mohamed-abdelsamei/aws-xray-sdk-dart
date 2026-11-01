@@ -133,10 +133,10 @@ abstract final class XRay {
   ///    bare IPv6, or `tcp:… udp:…`, using the `udp:` part); malformed values
   ///    fall back to `127.0.0.1:2000` and are reported once, as a
   ///    `daemon_address_invalid` diagnostic to [onDiagnostic] or, with no hook,
-  ///    as one line on `stderr` (the sanitized, shortened value is echoed; unset
-  ///    or empty values report nothing, and a closed `stderr` is ignored). It is reported once per
-  ///    install: a second call is a no-op, and [reset] then [configure] warns
-  ///    again;
+  ///    as one line on `stderr` (the sanitized, shortened value is echoed;
+  ///    unset or empty values report nothing, and a closed `stderr` is
+  ///    ignored). It is reported once per install: a second call is a no-op,
+  ///    and [reset] then [configure] warns again;
   ///  * `AWS_LAMBDA_FUNCTION_NAME` → default service name.
   ///
   /// Explicit [serviceName], [sampling], or a fully built [tracer] override the

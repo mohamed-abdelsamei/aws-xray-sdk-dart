@@ -16,10 +16,6 @@ import 'context/trace_scope.dart';
 
 export 'context/trace_scope.dart' show TraceContext;
 
-// True while an onDiagnostic hook is running, so a diagnostic raised from
-// inside the hook (on the same call stack) is ignored instead of looping.
-bool _inDiagnosticHook = false;
-
 /// Internal dispatcher, hidden from the package barrel: delivers a diagnostic
 /// to [tracer]'s `onDiagnostic` hook, if any. Never throws; a diagnostic
 /// raised while the hook is already running is ignored.
@@ -32,30 +28,6 @@ void reportDiagnostic(
 }) =>
     deliverDiagnostic(tracer.onDiagnostic, code, message,
         error: error, stackTrace: stackTrace);
-
-/// Internal, hidden from the package barrel: [reportDiagnostic] for a bare
-/// [hook], for callers that run before a tracer exists. Same guards.
-void deliverDiagnostic(
-  void Function(XRayDiagnostic diagnostic)? hook,
-  String code,
-  String message, {
-  Object? error,
-  StackTrace? stackTrace,
-}) {
-  if (hook == null || _inDiagnosticHook) return;
-  _inDiagnosticHook = true;
-  try {
-    XRayTracer._safeNotify(() {
-      final Object? result = (hook as dynamic)(createDiagnostic(code, message,
-          error: error, stackTrace: stackTrace));
-      // An async closure passed despite the docs: swallow its late failure so
-      // it cannot become an unhandled error and crash the process.
-      if (result is Future) result.then<void>((_) {}, onError: (_) {});
-    });
-  } finally {
-    _inDiagnosticHook = false;
-  }
-}
 
 // Zone key for the active segment.
 final _zoneKey = #_xraySegment;
@@ -83,7 +55,7 @@ final class _SendReport {
   void notify(Object error) {
     if (_reported) return;
     _reported = true;
-    XRayTracer._safeNotify(() => onSendError?.call(segment, error));
+    safeNotify(() => onSendError?.call(segment, error));
   }
 }
 
@@ -243,14 +215,15 @@ final class XRayTracer {
   /// leave no signal, such as an oversized node being trimmed to fit a
   /// datagram. See [XRayDiagnostic] for the documented codes.
   ///
-  /// The hook is synchronous and best-effort: it must not throw and must not
-  /// be `async` (an async closure's errors are not caught). A throw is
-  /// ignored. It may fire once per request for a systematically broken
-  /// adapter, so rate-limit inside the callback if that matters. While any
-  /// tracer's hook is running, diagnostics raised on the same call stack (by
-  /// this or any other tracer) are ignored. A custom sender that encodes
-  /// outside its send call (in a different zone) will not report trimmed nodes. It does not receive send
-  /// failures; those go to [onSendError].
+  /// The hook is synchronous and best-effort: it must not throw and should
+  /// not be `async` (a late failure of an async closure is swallowed, not
+  /// reported). A throw is ignored. It may fire once per request for a
+  /// systematically broken adapter, so rate-limit inside the callback if that
+  /// matters. While any tracer's hook is running, diagnostics raised on the
+  /// same call stack (by this or any other tracer) are ignored. A custom
+  /// sender that encodes outside its send call (in a different zone) will not
+  /// report trimmed nodes. It does not receive send failures; those go to
+  /// [onSendError].
   final void Function(XRayDiagnostic diagnostic)? onDiagnostic;
 
   /// How a recorded subsegment with no active trace context is handled.
@@ -399,7 +372,7 @@ final class XRayTracer {
       sampled: sampled,
       onComplete: (root) async {
         if (!sampled) {
-          _safeNotify(() => onSampledDrop?.call(virtualSegment));
+          safeNotify(() => onSampledDrop?.call(virtualSegment));
           return;
         }
         // Same containment + observability contract as closeSegment: never
@@ -702,7 +675,7 @@ final class XRayTracer {
   /// (whether via [run] or a direct call) must never fault the application.
   Future<void> closeSegment(Segment segment) async {
     if (!isSampled) {
-      _safeNotify(() => onSampledDrop?.call(segment));
+      safeNotify(() => onSampledDrop?.call(segment));
       return;
     }
     await _sendReported(segment, () => _sender.send(segment));
@@ -750,14 +723,6 @@ final class XRayTracer {
   /// it can sit in the constructor initializer.
   static void _reportTransportError(Object error) =>
       (Zone.current[_sendReportKey] as _SendReport?)?.notify(error);
-
-  /// Invokes an observability callback, swallowing any throw it makes so a
-  /// misbehaving hook can never fault the traced operation.
-  static void _safeNotify(void Function() notify) {
-    try {
-      notify();
-    } catch (_) {/* a hook must never break tracing */}
-  }
 
   /// Creates a new segment with a fresh trace ID.
   Segment beginSegment({String? parentId, String? user}) => Segment.begin(

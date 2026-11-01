@@ -55,6 +55,7 @@ lib/
   src/
     tracer.dart              # XRayTracer — Zone context, trace(), run(), runLambda(), captureAsync(), annotate(), subsegment API
     xray.dart                # XRay facade — trace(), capture(), patchHttp(), fromClient<T>(), untracedHttpClient()
+    diagnostic.dart          # XRayDiagnostic, onDiagnostic delivery (deliverDiagnostic, safeNotify)
     utils.dart               # randomHex(), nowSeconds(), truncateMessage() (1024-char cap)
     context/
       trace_scope.dart       # TraceScope / TraceContext — live mutable entity tree, serialized at close
@@ -76,6 +77,7 @@ lib/
       sender.dart            # Sender abstract class (send, close, sendPackets — default throws)
       udp_sender.dart        # UdpSender — fire-and-forget UDP, resolve/bind once, onError hook
       daemon_address.dart    # parseDaemonAddress() — AWS_XRAY_DAEMON_ADDRESS, all formats
+      daemon_address_warning.dart # warnIfDaemonAddressInvalid() — one-time malformed-address report
       noop_sender.dart       # NoopSender — discards all (local dev)
       in_memory_sender.dart  # InMemorySender — records segments + packets for test assertions
       segment_encoder.dart   # encode(), encodeSubsegmentDocs() — 65507-byte split logic
@@ -205,11 +207,11 @@ well-formed URLs.
 | **UDP-first** | Fire-and-forget; no ACK, no retry. PutTraceSegments HTTP API delivery is not shipped until SigV4 signing is implemented. |
 | **Immutable models** | `Segment` / `Subsegment` are value objects; every mutation returns a copy. No shared-state races. |
 | **Sampling at entry** | `shouldSample()` called once at `run()` entry; result stored in Zone and read by `closeSegment()` and every tracing path (HTTP clients, server middleware, Smithy interceptor) for header injection. Prevents orphaned child traces. |
-| **Tracing never faults the app** | User adapters, `toString()`, `toJson()` and the sender are all guarded; a failure in instrumentation never replaces the app's result or exception (the original error is rethrown unchanged). Sender / encode failures during finalization are contained and reported to `XRayTracer(onSendError:)` — including transport errors from the tracer-built `UdpSender` and `runLambda` encode failures. |
+| **Tracing never faults the app** | User adapters, `toString()`, `toJson()` and the sender are all guarded; a failure in instrumentation never replaces the app's result or exception (the original error is rethrown unchanged). Sender / encode failures during finalization are contained and reported to `XRayTracer(onSendError:)` — including transport errors from the tracer-built `UdpSender` and `runLambda` encode failures. Contained user-adapter failures, trimmed nodes and a malformed daemon address go to the optional `onDiagnostic` hook; send failures stay on `onSendError`. `onSendError`, `onSampledDrop` and `onDiagnostic` all run through `safeNotify`, which swallows sync throws and the late failure of an async hook. |
 | **No `dart:mirrors`** | AOT-safe; compiles with `dart compile exe`. No `build_runner` step. Uses `dart:io`, so not Flutter-web compatible. |
 | **`abstract class Sender`** | Not `abstract interface class`: `sendPackets()` has a concrete default so sub-classes compile, but it throws `UnsupportedError` — a custom sender used with `runLambda()` must override it. The tracer reports the failure via `onSendError`. `NoopSender`, `InMemorySender`, `UdpSender` override it. |
 | **Untrusted trace headers** | Incoming `X-Amzn-Trace-Id` values are validated (hex IDs, `validParentId()`); a malformed header starts a fresh trace instead of linking to a bogus parent. |
-| **Test seams hidden** | Internal helpers that tests import directly (`redactUrl`, `redactUrlsInText`, `newTracerWithUdpSeamsForTesting`) are excluded with `hide` in the barrel. Keep new seams out of the public API the same way. |
+| **Test seams hidden** | Internal helpers that tests import directly (`redactUrl`, `redactUrlsInText`, `newTracerWithUdpSeamsForTesting`, `createDiagnostic`) are excluded with `hide` in the barrel. Keep new seams out of the public API the same way. The encoder reports trims through a zone value (`trimReportKey` in `segment_encoder.dart`) that the tracer sets around each send; keep the key and its callback signature in sync on both sides. |
 
 ---
 

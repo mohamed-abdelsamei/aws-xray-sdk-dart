@@ -470,22 +470,24 @@ added in any release.
   segment, so a hook that logs it should treat it as sensitive. The call result, or the original error, is unchanged. An
   error thrown by the AWS call itself is the app's and is not reported.
   `XRayBaseClient` enrichment failures are not reported.
-- The hook is synchronous and best-effort. A throwing callback is ignored; an
-  `async` callback's late failure is swallowed (but hooks must still be
-  synchronous). While any
-  tracer's hook is running, a diagnostic raised on the same call stack (by any
-  tracer) is ignored. A custom sender that encodes outside its send call (in a
+- The hook is synchronous and best-effort. A throwing callback is ignored, and
+  so is the late failure of an `async` callback (hooks should still be
+  synchronous). While any tracer's hook is running, a diagnostic raised on the
+  same call stack (by any tracer) is ignored. A custom sender that encodes outside its send call (in a
   different zone) will not report `node_trimmed`.
 - `daemon_address_invalid`: `XRay.configure` found `AWS_XRAY_DAEMON_ADDRESS`
   set but malformed and fell back to `127.0.0.1:2000`. The message includes
-  the value, sanitized (URLs redacted, control characters replaced, so it is one
-  line) and shortened to about 100 characters. It is emitted once per install:
-  a second `configure` is a no-op, and `XRay.reset()` followed by `configure`
-  warns again. It is emitted only when
-  `configure` builds the tracer itself (not with a prebuilt `tracer:`); an
-  unset or empty variable never reports. With no `onDiagnostic` callback,
-  `configure` writes one line to `stderr` instead (a closed `stderr` is
-  ignored). This is the only case where the SDK prints without a callback.
+  the value, sanitized (URLs redacted, control and format characters replaced,
+  so it is one line) and shortened to about 100 characters. Scheme-less
+  userinfo (`user:pw@host:badport`) is not recognised as a URL and is not
+  masked. A TCP-only value such as `tcp:127.0.0.1:2000` counts as malformed
+  (the SDK sends over UDP), so Lambda users with such a value will see the
+  line after upgrading. It is emitted once per install: a second `configure`
+  is a no-op, and `XRay.reset()` followed by `configure` warns again. It is
+  emitted only when `configure` builds the tracer itself (not with a prebuilt
+  `tracer:`); an unset or empty variable never reports. With no `onDiagnostic`
+  callback, `configure` writes one line to `stderr` instead (a closed `stderr`
+  is ignored). This is the only such line that fires at configure time.
 - Send failures are not diagnostics; they go to `onSendError` only.
 - Apart from the malformed daemon address above, nothing is printed when no
   callback is set.
