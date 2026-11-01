@@ -657,7 +657,10 @@ Key fields:
 
 Oversized segments (> 65507 bytes, the maximum IPv4 UDP payload) are
 automatically split into a skeleton segment plus one independent subsegment
-document per subsegment.
+document per subsegment. A single node that is still too large has its largest
+`metadata` values replaced with `[truncated: N bytes]` (and
+`metadata.xray.truncated` set) so the datagram fits; see
+`doc/tracing-behavior.md`.
 
 ---
 

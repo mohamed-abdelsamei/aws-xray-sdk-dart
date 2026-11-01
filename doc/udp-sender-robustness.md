@@ -62,6 +62,14 @@ address.
   throwing, and the socket keeps refusing afterwards), the failure goes to
   `onError` and the memoized connection is closed and cleared, so the next
   datagram rebinds a fresh socket.
+- **Oversized nodes are trimmed before sending** — the encoder fits a single
+  node that is over 65507 bytes (large `metadata` values become
+  `[truncated: N bytes]`; as a last resort the node is reduced to its
+  structural fields), so the encoder's own output does not exceed the IPv4
+  datagram limit. This assumes ids of normal length (ids taken from a trace
+  header are fixed-length hex; only an id passed directly to `runLambda` could
+  be huge). Packets handed straight to `sendPackets` bypass the encoder and are
+  not checked. See `doc/tracing-behavior.md`.
 - **`close()` is re-openable** — closes the socket and resets the memo.
 
 ## Known limitation (must be documented, not engineered around)

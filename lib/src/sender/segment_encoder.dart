@@ -21,9 +21,15 @@ const _header = '{"format":"json","version":1}';
 /// its children, and each child is emitted as a separate document parented to
 /// it — so the tree is preserved while every datagram stays within the limit.
 ///
-/// A single leaf subsegment larger than the cap cannot be split further; it is
-/// emitted as-is (the daemon may reject it) rather than dropped, so the failure
-/// is at least visible.
+/// A single node (a leaf subsegment, or a skeleton whose own payload is still
+/// too big) cannot be split further, so it is trimmed to fit instead: the
+/// largest `metadata` values are replaced with a `[truncated: N bytes]` marker
+/// (just enough of them), and `metadata.xray.truncated` is set to `true`. If
+/// that is not enough, the node is reduced to its small structural fields
+/// (ids, times, status flags, a shortened `name`) plus the marker. The
+/// in-memory model is never changed, and a node that already fits is emitted
+/// byte for byte as before. This guarantees the datagram fits the cap; it does
+/// not guarantee the service accepts the trimmed document.
 List<List<int>> encode(Segment segment) {
   // Serialise once and reuse the map for the split path.
   final json = segment.toJson();
@@ -32,7 +38,7 @@ List<List<int>> encode(Segment segment) {
 
   // Segment is too large — send skeleton + individual subsegment documents.
   final skeleton = {...json}..remove('subsegments');
-  final result = <List<int>>[_encodeOne(skeleton)];
+  final result = <List<int>>[_fitNode(skeleton)];
   final traceId = segment.traceId.toString();
 
   for (final sub in segment.subsegments) {
@@ -60,7 +66,8 @@ List<List<int>> encodeSubsegmentDocs(
 }
 
 /// Emits [sub] (and, if needed, its descendants) as independent subsegment
-/// documents into [out], keeping each datagram within [_maxUdpBytes].
+/// documents into [out], keeping each datagram within [_maxUdpBytes] (a node
+/// that is too big even on its own is trimmed, see [encode]).
 void _emitSubsegment(
   Subsegment sub,
   String parentId,
@@ -69,17 +76,23 @@ void _emitSubsegment(
   Map<String, Object?>? json,
 }) {
   json ??= sub.toJson();
+  final envelope = _envelope(parentId, traceId);
   final doc = encodeSubsegmentDoc(json, parentId, traceId);
-  if (doc.length <= _maxUdpBytes || sub.subsegments.isEmpty) {
-    // Fits, or is a leaf we cannot split further — emit as-is.
+  if (doc.length <= _maxUdpBytes) {
     out.add(doc);
     return;
   }
+  if (sub.subsegments.isEmpty) {
+    // A leaf cannot be split further — trim it to fit.
+    out.add(_fitNode(json, envelope, doc));
+    return;
+  }
 
-  // Too large with children inlined: emit this node without its children, then
-  // re-parent each child to it as its own document (recursing as needed).
+  // Too large with children inlined: emit this node without its children
+  // (trimmed if it is still too big), then re-parent each child to it as its
+  // own document (recursing as needed).
   final skeleton = {...json}..remove('subsegments');
-  out.add(encodeSubsegmentDoc(skeleton, parentId, traceId));
+  out.add(_fitNode(skeleton, envelope));
   for (final child in sub.subsegments) {
     _emitSubsegment(child, sub.id, traceId, out);
   }
@@ -96,12 +109,155 @@ List<int> encodeSubsegmentDoc(
   String parentId,
   String traceId,
 ) =>
-    _encodeOne({
-      ...subDoc,
+    _encodeOne({...subDoc, ..._envelope(parentId, traceId)});
+
+Map<String, Object?> _envelope(String parentId, String traceId) => {
       'type': 'subsegment',
       'parent_id': parentId,
       'trace_id': traceId,
+    };
+
+const _truncatedKey = 'truncated';
+const _nameCap = 200;
+
+// Small, bounded fields kept when a node has to be reduced to its structure.
+const _structuralKeys = [
+  'trace_id',
+  'id',
+  'parent_id',
+  'type',
+  'start_time',
+  'end_time',
+  'in_progress',
+  'fault',
+  'error',
+  'throttle',
+];
+
+/// Encodes [node] (plus [envelope], the fields an independent subsegment
+/// document adds) so the datagram is at most [_maxUdpBytes]. Called only for a
+/// node that cannot be split further; [node] is a `toJson()` copy and is never
+/// modified.
+List<int> _fitNode(
+  Map<String, Object?> node, [
+  Map<String, Object?> envelope = const {},
+  List<int>? encoded,
+]) {
+  final whole = encoded ?? _encodeOne({...node, ...envelope});
+  if (whole.length <= _maxUdpBytes) return whole;
+
+  // First trim metadata: replace the largest values with a marker, as few as fit.
+  final metadata = node['metadata'];
+  if (metadata is Map) {
+    final candidates = <_Replaceable>[];
+    metadata.forEach((ns, values) {
+      if (ns is! String || values is! Map) return;
+      values.forEach((key, value) {
+        if (key is! String) return;
+        final size = _valueBytes(value).length;
+        final marker = _marker(size);
+        // Replacing a value no longer than its marker would grow the document.
+        if (_valueBytes(marker).length < size) {
+          candidates.add(_Replaceable(ns, key, size, marker));
+        }
+      });
     });
+    // Largest first; the sort is stable on ties because of the index.
+    final indexed = [for (var i = 0; i < candidates.length; i++) i];
+    indexed.sort((a, b) {
+      final bySize = candidates[b].size.compareTo(candidates[a].size);
+      return bySize != 0 ? bySize : a.compareTo(b);
+    });
+    final ordered = [for (final i in indexed) candidates[i]];
+
+    List<int> attempt(int count) => _encodeOne({
+          ...node,
+          'metadata': _trimMetadata(metadata, ordered.take(count)),
+          ...envelope,
+        });
+
+    if (ordered.isNotEmpty && attempt(ordered.length).length <= _maxUdpBytes) {
+      // Smallest sufficient count (size only shrinks as more are replaced).
+      var lo = 1, hi = ordered.length;
+      while (lo < hi) {
+        final mid = (lo + hi) ~/ 2;
+        if (attempt(mid).length <= _maxUdpBytes) {
+          hi = mid;
+        } else {
+          lo = mid + 1;
+        }
+      }
+      return attempt(lo);
+    }
+  }
+
+  // Still too big: reduce to a bare node. Only small structural fields survive.
+  final bare = <String, Object?>{
+    for (final k in _structuralKeys)
+      if (node.containsKey(k)) k: node[k],
+  };
+  bare['name'] = _capName(node['name']);
+  final ns = node['namespace'];
+  if (ns == 'aws' || ns == 'remote') bare['namespace'] = ns;
+  bare['metadata'] = {
+    'xray': {_truncatedKey: true},
+  };
+  return _encodeOne({...bare, ...envelope});
+}
+
+class _Replaceable {
+  _Replaceable(this.namespace, this.key, this.size, this.marker);
+  final String namespace;
+  final String key;
+  final int size;
+  final String marker;
+}
+
+String _marker(int bytes) => '[truncated: $bytes bytes]';
+
+/// Encoded size of one value as it will be written (including the
+/// `toEncodable` fallback for values that are not JSON-native).
+List<int> _valueBytes(Object? value) =>
+    utf8.encode(jsonEncode(value, toEncodable: _fallbackEncodable));
+
+/// A copy of [metadata] with [replaced] swapped for their markers and
+/// `xray.truncated` set; every other value and key keeps its place.
+Map<String, Object?> _trimMetadata(
+  Map<dynamic, dynamic> metadata,
+  Iterable<_Replaceable> replaced,
+) {
+  final byNs = <String, Map<String, String>>{};
+  for (final r in replaced) {
+    (byNs[r.namespace] ??= {})[r.key] = r.marker;
+  }
+  final out = <String, Object?>{};
+  metadata.forEach((ns, values) {
+    if (ns is! String) return;
+    final swap = byNs[ns];
+    out[ns] = swap == null || values is! Map
+        ? values
+        : {
+            for (final e in values.entries)
+              e.key: swap.containsKey(e.key) ? swap[e.key] : e.value,
+          };
+  });
+  final xray = out['xray'];
+  out['xray'] = {
+    if (xray is Map) ...xray,
+    _truncatedKey: true,
+  };
+  return out;
+}
+
+/// [name] cut to [_nameCap] UTF-16 code units, never inside a surrogate pair.
+String _capName(Object? name) {
+  final s = name is String ? name : '';
+  if (s.length <= _nameCap) return s;
+  var end = _nameCap;
+  final last = s.codeUnitAt(end - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) end--;
+  return s.substring(0, end);
+}
 
 List<int> _encodeOne(Map<String, Object?> doc) {
   final json = jsonEncode(doc, toEncodable: _fallbackEncodable);

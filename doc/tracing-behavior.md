@@ -423,10 +423,23 @@ flowchart TD
 - UDP has no delivery acknowledgment. `UdpSender.onError` reports local
   resolve/bind/send failures only, not daemon receipt.
 
-Known encoding boundary: the current encoder splits large segments with multiple
-subsegments, but it does not truncate a single oversized subsegment document.
-Keep individual subsegment metadata/cause payloads well below the 65507-byte UDP
-datagram limit.
+Oversized single nodes: a node that cannot be split further (a leaf
+subsegment, or a segment/subsegment whose own payload is still over 65507 bytes
+without its children) is trimmed so its datagram fits. First, the largest
+`metadata` values are replaced with the string `[truncated: N bytes]` (N is the
+value's encoded JSON size), just as many as needed, and
+`metadata.xray.truncated` is set to `true`. A value that is not longer than its
+marker is never replaced. If that is not enough (for example a huge annotation
+or name), the node is reduced to its small structural fields (ids, times,
+status flags, `name` cut to 200 UTF-16 code units) plus the marker; `user`,
+`origin`, `http`, `aws`, `cause` and `annotations` are dropped. The recorded
+model is never changed, and a node that already fits is sent unchanged.
+
+The encoder's output fits the datagram (assuming normal-length ids; packets given directly to `sendPackets` are not checked), but this it does not guarantee the X-Ray service
+accepts or samples the trimmed document. Metadata is not indexed, so the
+marker cannot be used as a filter in X-Ray. Code that reads the document back
+will see a string where a metadata value used to be. The macOS local limit
+(9216 bytes by default) is separate and still applies in local development.
 
 ## Supported Runtimes And Scope
 
