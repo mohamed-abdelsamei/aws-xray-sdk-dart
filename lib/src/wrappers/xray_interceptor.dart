@@ -83,7 +83,8 @@ final class XRayInterceptor<Req, Res> {
         final SmithyRequestAdapter<Req> adapted;
         try {
           adapted = _requestAdapter(request);
-        } catch (_) {
+        } catch (e, st) {
+          _report('requestAdapter threw; the call was sent untraced', e, st);
           // No operation name to trace under: send untraced.
           return inner(request);
         }
@@ -102,14 +103,24 @@ final class XRayInterceptor<Req, Res> {
             sampled: _tracer.isSampled,
           );
           tracedRequest = adapted.withTraceHeader(request, traceHeader);
-        } catch (_) {
+        } catch (e, st) {
+          _report(
+              'withTraceHeader threw; the call was sent without the '
+              'trace header',
+              e,
+              st);
           tracedRequest = request;
         }
 
         AwsData awsData;
         try {
           awsData = _extractor(adapted.operationName, adapted.body);
-        } catch (_) {
+        } catch (e, st) {
+          _report(
+              'resource extractor threw; the subsegment has no resource '
+              'data',
+              e,
+              st);
           awsData = AwsData(operation: adapted.operationName);
         }
 
@@ -152,7 +163,12 @@ final class XRayInterceptor<Req, Res> {
             } else {
               _tracer.failSubsegment(failed, e);
             }
-          } catch (_) {
+          } catch (err, st) {
+            _report(
+                'recording the call error threw; the subsegment was '
+                'closed as a bare fault',
+                err,
+                st);
             _endQuietly(sub.withFault());
           }
           rethrow;
@@ -184,11 +200,21 @@ final class XRayInterceptor<Req, Res> {
             done = done.withThrottle();
           }
           _tracer.endSubsegment(done);
-        } catch (_) {
+        } catch (e, st) {
+          _report(
+              'recording the response failed (the response adapter or an SDK '
+              'step threw); the subsegment was closed without response data',
+              e,
+              st);
           // Close without response data rather than fault a successful call.
           try {
             _tracer.endSubsegment(sub.withHttp(requestOnly).withAws(awsData));
-          } catch (_) {
+          } catch (err, st2) {
+            _report(
+                'closing the subsegment without response data threw; it '
+                'was closed bare',
+                err,
+                st2);
             _endQuietly(sub);
           }
         }
@@ -203,9 +229,19 @@ final class XRayInterceptor<Req, Res> {
     try {
       final status = hook(error);
       return status != null && status >= 400 ? status : null;
-    } catch (_) {
+    } catch (e, st) {
+      _report('errorStatus threw; the error was classified without a status', e,
+          st);
       return null;
     }
+  }
+
+  /// Reports an adapter or enrichment failure. Never throws.
+  void _report(String message, Object error, StackTrace stackTrace) {
+    try {
+      reportDiagnostic(_tracer, 'adapter_failed', message,
+          error: error, stackTrace: stackTrace);
+    } catch (_) {}
   }
 
   /// Last-resort close of the bare [sub] so it is never left pending.

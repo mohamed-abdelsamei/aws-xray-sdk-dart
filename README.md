@@ -641,7 +641,14 @@ XRay.configure(
 
 `XRayDiagnostic.code` is a stable string, not an enum, so new codes can appear
 in any release. Codes in use: `node_trimmed` (a single segment or subsegment
-was too large for one datagram and its metadata was shortened or dropped).
+was too large for one datagram and its metadata was shortened or dropped) and
+`adapter_failed` (an adapter you registered for a Smithy client threw: the
+`requestAdapter`, its `withTraceHeader`, the resource extractor, the
+`responseAdapter` or the `errorStatus` hook; the call itself is unaffected and
+`error` is the object thrown at that step, which is usually your adapter's
+error. An error from the AWS call itself is yours and is never reported).
+`error` is the raw thrown object and is not redacted (unlike the emitted
+segment), so treat it as sensitive if your hook logs it.
 The hook is synchronous: it must not throw and must not be `async`. While
 any tracer's hook is running, diagnostics raised on the same call stack (by any
 tracer) are ignored. A custom sender that encodes outside its send call will not

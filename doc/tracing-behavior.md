@@ -458,6 +458,18 @@ added in any release.
   bare node (see "Oversized single nodes"). It is reported on both the `run()`
   and `runLambda()` paths, through senders that encode (`UdpSender`). A node
   that fits produces nothing.
+- `adapter_failed`: code you registered for a Smithy client threw. The sites
+  are the `requestAdapter` (the call is sent untraced), `withTraceHeader` (sent
+  without the trace header), the resource extractor (no resource data), the
+  `responseAdapter` (subsegment closed without response data) and the
+  `errorStatus` hook (error classified without a status), plus the last-resort
+  fallbacks when recording the outcome itself fails. `error` and `stackTrace`
+  describe the object thrown at that step, which is usually the adapter's own
+  error (the response-adapter step also covers the SDK's enrichment after it).
+  `error` is the raw thrown object and is not redacted, unlike the emitted
+  segment, so a hook that logs it should treat it as sensitive. The call result, or the original error, is unchanged. An
+  error thrown by the AWS call itself is the app's and is not reported.
+  `XRayBaseClient` enrichment failures are not reported.
 - The hook is synchronous and best-effort. A throwing callback is ignored; an
   `async` callback's late failure is swallowed (but hooks must still be
   synchronous). While any
