@@ -441,7 +441,8 @@ Lambda injects the daemon address via `AWS_XRAY_DAEMON_ADDRESS`. Do **not**
 hardcode `127.0.0.1:2000` — newer Lambda environments use a link-local address
 (`169.254.100.1:2000`). The recommended setup lets `XRay.configure()` read and
 parse it — including the `[v6]:port`, bare IPv6, and `tcp:… udp:…` forms; a
-malformed value falls back to `127.0.0.1:2000`:
+malformed value falls back to `127.0.0.1:2000` and is reported once (see
+[Diagnostics hook](#diagnostics-hook)):
 
 ```dart
 final tracer = XRay.configure(

@@ -34,7 +34,7 @@ const _fallback = (defaultDaemonHost, defaultDaemonPort);
     _tryParse(value?.trim() ?? '') ?? _fallback;
 
 /// Whether [value] is set (non-blank) but [parseDaemonAddress] cannot parse
-/// it, so it silently became `127.0.0.1:2000`. Unset and blank are not
+/// it, so it became `127.0.0.1:2000` (`XRay.configure` reports this). Unset and blank are not
 /// malformed. Internal; never throws.
 bool isMalformedDaemonAddress(String? value) {
   final trimmed = value?.trim() ?? '';

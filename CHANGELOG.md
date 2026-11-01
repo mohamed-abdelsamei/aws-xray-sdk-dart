@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- **`onDiagnostic` hook and `XRayDiagnostic`.** `XRayTracer(onDiagnostic:)`
+  receives an `XRayDiagnostic` for contained problems that used to leave no
+  signal. It carries `code`, `message`, and, when there is a failure, `error`
+  and `stackTrace`. `code` is an open string rather than an enum, so new codes
+  can appear in any release; only the SDK creates diagnostics (no public
+  constructor). Codes in this release:
+  - `node_trimmed`: a single oversized segment or subsegment was trimmed to fit
+    the datagram (see 0.5.1). Reported only through senders that encode in
+    their send call, such as `UdpSender`.
+  - `adapter_failed`: code you registered for a Smithy client threw and was
+    contained: the `requestAdapter`, its `withTraceHeader` injection, the
+    resource extractor, the `responseAdapter`, or the `errorStatus` hook. The
+    call result, or the original error, is unchanged. An error thrown by the
+    AWS call itself is yours and is never reported.
+  - `daemon_address_invalid`: see Changed below.
+
+  The hook is synchronous and best-effort: a callback that throws is ignored,
+  an `async` callback's late failure is swallowed, and while any tracer's hook
+  is running, diagnostics raised on the same call stack are ignored. Send
+  failures are not diagnostics; they stay on `onSendError`. Known limits:
+  `XRayBaseClient` enrichment failures are not reported through the hook, and
+  the reported `error` is the raw thrown object, not redacted like the emitted
+  segment, so treat it as sensitive if your hook logs it.
+- **`XRay.configure` accepts `onSendError`, `onSampledDrop` and
+  `onDiagnostic`**, passed to the tracer it builds. Like `serviceName` and
+  `sampling`, they are ignored when you supply `tracer:`.
+
+### Changed
+
+- **Behaviour change — a malformed `AWS_XRAY_DAEMON_ADDRESS` is now reported.**
+  `XRay.configure` used to fall back to `127.0.0.1:2000` with no signal. It now
+  reports once per install: as a `daemon_address_invalid` diagnostic when you
+  pass `onDiagnostic`, otherwise as one line on `stderr` (the value is
+  sanitized: URLs redacted, control characters replaced, shortened to about
+  100 characters). A second `configure` is a no-op; `XRay.reset()` then
+  `configure` reports again. Unset or empty values never report, and nothing
+  is reported when you supply `tracer:`. The fallback itself is unchanged.
+  This is the only case where the SDK prints without a callback.
+
 ## 0.5.1
 
 ### Changed
