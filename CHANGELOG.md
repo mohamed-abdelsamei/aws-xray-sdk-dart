@@ -13,7 +13,7 @@
 
 ### Changed
 
-Both entries below change observable behaviour; review them before upgrading.
+The entries below change observable behaviour; review them before upgrading.
 
 - **Behaviour change — recorded URLs no longer include query strings,
   userinfo, or fragments.** `http.request.url` is now
@@ -22,7 +22,23 @@ Both entries below change observable behaviour; review them before upgrading.
   `HttpRequestData`), so presigned-URL signatures, OAuth codes, and `user:pw@`
   credentials stay out of X-Ray. There is no setting to keep the query string.
   The in-memory `HttpRequestData.url` keeps the raw value; only the emitted
-  document is redacted. Exception messages in `cause` may still contain URLs.
+  document is redacted. If a `?` or `#` comes before an `@`, that `@` may be
+  part of a query: only a valid `host[:port]` before the `?` or `#` is kept.
+- **Behaviour change — URLs inside exception messages are redacted too.**
+  `cause.exceptions[].message` drops userinfo, query strings, and fragments
+  from every URL it contains, so errors such as
+  `ClientException: …, uri=https://…?X-Amz-Signature=…` no longer leak what
+  `http.request.url` hides. This applies to caught errors, AWS error-body
+  messages, and user-built `XRayException`s (in the emitted JSON; the
+  in-memory `message` keeps its raw value). Redaction runs before the
+  1024-character cap (see "Exception messages are capped" below). Anything
+  from a `:` followed by `/` or `\` up to the next ASCII space or control
+  character is treated as a URL. Not caught: URLs without a scheme, bare
+  query strings, encoded URLs (`https:%2F%2Fu:p@h/p`, HTML or `\u` escapes),
+  userinfo containing whitespace or control characters, userinfo containing a
+  raw `/`, `?` or `#` when what precedes it looks like a host or host:port
+  (`https://admin:2024/s3cret@h/p` reads as host, port and path), and
+  secrets in the URL path.
 - **Behaviour change — `Sender.sendPackets` now throws `UnsupportedError` by
   default.** It was a
   silent no-op, so a custom `Sender` that only overrode `send` lost every

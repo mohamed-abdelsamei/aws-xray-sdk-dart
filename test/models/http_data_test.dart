@@ -4,9 +4,9 @@ import 'package:aws_xray_sdk/src/models/http_data.dart' show redactUrl;
 import 'package:test/test.dart';
 
 void main() {
-  group('redactUrl (ADR 0001)', () {
+  group('redactUrl', () {
     const cases = <String, String>{
-      // AC3.1: userinfo, query, and fragment all removed.
+      // Userinfo, query, and fragment all removed.
       'https://user:pw@h.example/p?X-Amz-Signature=abc#f':
           'https://h.example/p',
       'https://h.example/p': 'https://h.example/p',
@@ -24,9 +24,20 @@ void main() {
       '?only=query': '',
       '/users/a@b.com': '/users/a@b.com',
       'mailto:a@b.com': 'mailto:a@b.com',
-      // Credentials hidden behind ?, #, /, or \ are still stripped.
-      'https://u:p?ss@h/p': 'https://h/p',
-      'https://u:p#ss@h/p': 'https://h/p',
+      // Credentials hidden behind ?, #, /, or \ are still stripped. A ? or #
+      // before the @ could also be a query holding an @: only a valid
+      // host[:port] before it is kept.
+      'https://u:p?ss@h/p': 'https://',
+      'https://u:p#ss@h/p': 'https://',
+      'https://u:123?ss@h/p': 'https://u:123',
+      'https://u@h?e=a@b&token=SECRET': 'https://',
+      // An @ in the query or fragment of a URL with no path.
+      'https://api.example.com?email=a@b.com&token=SECRET':
+          'https://api.example.com',
+      'https://h#a@b.c&token=SECRET': 'https://h',
+      'https://h:443?e=a@b&token=SECRET': 'https://h:443',
+      'https://[::1]:8080?e=a@b&t=S': 'https://[::1]:8080',
+      'https://h?e=a@b/c&token=SECRET': 'https://h',
       'https://u:pa/ss@h/p': 'https://h/p',
       r'https:\\u:p@h/p': r'https:\\h/p',
       'u:p@host/p?x': 'host/p',
@@ -38,7 +49,7 @@ void main() {
       // RFC 3986 reads this as host `u`, port 123, path `/x@h/p`: a valid
       // authority, so it is kept as is.
       'https://u:123/x@h/p': 'https://u:123/x@h/p',
-      // AC3.2: strings Uri.tryParse rejects are still cut at the first ?/#.
+      // Strings Uri.tryParse rejects are still cut at the first ?/#.
       'http://[bad/p?secret=1': 'http://[bad/p',
       'http://user:pw@h:abc/p?secret=1#f': 'http://h:abc/p',
       'ht tp://h/?secret=1': 'ht tp://h/',
@@ -49,7 +60,7 @@ void main() {
       });
     });
 
-    test('AC3.2 fixtures really are rejected by Uri.tryParse', () {
+    test('unparseable fixtures really are rejected by Uri.tryParse', () {
       expect(Uri.tryParse('http://[bad/p?secret=1'), isNull);
       expect(Uri.tryParse('http://user:pw@h:abc/p?secret=1#f'), isNull);
       expect(Uri.tryParse('ht tp://h/?secret=1'), isNull);
@@ -74,6 +85,14 @@ void main() {
       const req = HttpRequestData(method: 'GET', url: raw);
       expect(req.url, raw);
       expect(req.toJson()['url'], 'https://h.example/p');
+    });
+
+    test('toJson drops a query whose @ could pass for userinfo', () {
+      const req = HttpRequestData(
+        method: 'GET',
+        url: 'https://api.example.com?email=a@b.com&token=SECRET',
+      );
+      expect(req.toJson()['url'], 'https://api.example.com');
     });
 
     test('toJson includes traced when set', () {

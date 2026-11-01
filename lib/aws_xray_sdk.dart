@@ -30,7 +30,7 @@ export 'src/xray.dart';
 export 'src/models/trace_id.dart';
 export 'src/models/segment.dart';
 export 'src/models/subsegment.dart';
-export 'src/models/http_data.dart' hide redactUrl;
+export 'src/models/http_data.dart' hide redactUrl, redactUrlsInText;
 export 'src/models/aws_data.dart';
 export 'src/models/cause.dart';
 

@@ -412,6 +412,50 @@ void main() {
       expect(exc['type'], 'ProvisionedThroughputExceededException');
     });
 
+    group('URLs in AWS error-body messages are redacted', () {
+      Future<String> recordedMessage(int status, String body) async {
+        final client = XRayBaseClient(_MockClient(status, body: body), tracer);
+        final segment = tracer.beginSegment();
+        await tracer.run(segment, () async {
+          await client.post(
+            Uri.parse('https://sns.us-east-1.amazonaws.com/'),
+            body: 'Action=Publish',
+          );
+        });
+        final sub = sender.lastSubs.first as Map;
+        final exc = ((sub['cause'] as Map)['exceptions'] as List).first as Map;
+        expect(exc['remote'], isTrue);
+        return exc['message'] as String;
+      }
+
+      test('JSON body', () async {
+        final message = await recordedMessage(
+          400,
+          '{"__type":"X","message":"see https://h.example/p?token=abc"}',
+        );
+        expect(message, 'see https://h.example/p');
+      });
+
+      test('XML body', () async {
+        final message = await recordedMessage(
+          403,
+          '<ErrorResponse><Error><Code>X</Code>'
+          '<Message>see https://u:p@h.example/p</Message>'
+          '</Error></ErrorResponse>',
+        );
+        expect(message, 'see https://h.example/p');
+      });
+
+      test('redaction runs before the 1024-character cap', () async {
+        final text = '${'a' * 1005} https://user:secretpw@h/p';
+        final message = await recordedMessage(
+          400,
+          jsonEncode({'__type': 'X', 'message': text}),
+        );
+        expect(message, '${'a' * 1005} https://h/p');
+      });
+    });
+
     test('records aws error cause from XML error body', () async {
       final inner = _MockClient(
         403,

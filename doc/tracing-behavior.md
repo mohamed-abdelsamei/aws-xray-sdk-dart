@@ -116,10 +116,30 @@ When the SDK injects `X-Amzn-Trace-Id`, the emitted subsegment records:
 ```
 
 - `http.request.url` is recorded as `scheme://host[:port]/path`. Userinfo
-  (`user:pw@`), the whole query string, and the fragment are always stripped
-  (ADR 0001), so presigned-URL signatures and tokens never reach X-Ray. This
+  (`user:pw@`), the whole query string, and the fragment are always stripped,
+  so presigned-URL signatures and tokens never reach X-Ray. This
   applies to every instrumentation path and to user-built `HttpRequestData`.
+  If a `?` or `#` comes before an `@`, that `@` may be part of a query: only a
+  valid `host[:port]` before the `?` or `#` is kept, the rest is dropped.
   Before 0.4.2 the full URL, query string included, was recorded.
+- URLs inside `cause.exceptions[].message` are redacted with the same rule
+  before the message is capped at 1024 characters, so a URL cut by the cap
+  cannot leave part of a password behind. This covers messages from caught
+  errors (for example `ClientException: …, uri=https://…`), AWS error-body
+  messages, and user-built `XRayException`s (the emitted JSON only; the
+  in-memory `message` keeps its raw value). Anything from a `:` followed by
+  `/` or `\` up to the next ASCII space or control character is treated as a
+  URL, whatever its scheme, so text such as `C:\dir\f?x` loses `?x`. Not
+  caught: URLs without a scheme (`host/path?sig=…`, `//u:p@h/…`), a bare query
+  string on its own, encoded URLs (`https:%2F%2Fu:p@h/p`, HTML entities or
+  `\u` escapes), userinfo containing whitespace or control characters (space,
+  tab, …), userinfo containing a raw `/`, `?` or `#` when what precedes it
+  looks like a host or host:port — a username alone, or a password that starts
+  with digits (`https://admin:2024/s3cret@h/p`, `https://u:123?x@h/p` and
+  `https://user?pw@h/p` cannot be told apart from host, port and path or
+  query), secrets in the URL path, and
+  secrets that are not URLs at all. Before 0.4.2 messages were recorded as
+  thrown.
 - `http.request.traced = true` is asserted on completed response paths after the
   SDK injects `X-Amzn-Trace-Id`.
 - `content_length` is recorded when the instrumentation path can observe it.

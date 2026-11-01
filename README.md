@@ -128,8 +128,10 @@ Two ways to trace outbound HTTP, both injecting `X-Amzn-Trace-Id`, recording
 the request URL and response status, marking HTTP errors, and closing the
 subsegment when the response body stream finishes. `http.request.url` is
 recorded as `scheme://host[:port]/path`, without userinfo, query string, or
-fragment. Exception messages in a subsegment `cause` are recorded as thrown
-and may still contain the full URL.
+fragment. URLs inside exception messages in a subsegment `cause` are
+redacted the same way before the message is capped at 1024 characters.
+Encoded URLs, userinfo containing whitespace, and URLs without a scheme are
+not caught; see `doc/tracing-behavior.md` for the full list.
 
 ### `dart:io` — global patch
 

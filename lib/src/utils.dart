@@ -19,7 +19,7 @@ const _maxMessageLength = 1024;
 const _truncationMarker = '…[truncated]';
 
 /// Caps a recorded exception message at 1024 UTF-16 code units and appends
-/// `…[truncated]` (ADR 0001). Never leaves a lone high surrogate at the cut.
+/// `…[truncated]`. Never leaves a lone high surrogate at the cut.
 String truncateMessage(String s) {
   if (s.length <= _maxMessageLength) return s;
   var end = _maxMessageLength;

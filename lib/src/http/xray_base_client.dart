@@ -409,9 +409,9 @@ final class XRayBaseClient extends http.BaseClient {
       type: type,
       cause: Cause(exceptions: [
         XRayException(
-          id: _exceptionId(),
+          id: randomHex(16),
           type: type,
-          message: truncateMessage(message),
+          message: truncateMessage(redactUrlsInText(message)),
           remote: true,
         ),
       ]),
@@ -474,6 +474,4 @@ final class XRayBaseClient extends http.BaseClient {
       return m.group(0)!; // unknown or out-of-range entity: leave as-is
     });
   }
-
-  static String _exceptionId() => XRayException.from(Object()).id;
 }
