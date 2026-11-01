@@ -11,6 +11,16 @@
   (4xx error, 429 throttle, 5xx fault) and records `http.response.status`
   instead of always being a fault. Without the hook, behaviour is unchanged.
 
+### Changed
+
+- **`Sender.sendPackets` now throws `UnsupportedError` by default.** It was a
+  silent no-op, so a custom `Sender` that only overrode `send` lost every
+  `runLambda` trace without notice. The error names the sender class; the
+  tracer reports it through `onSendError` (when set) and never throws into
+  the app. Direct callers of `sendPackets` on such a sender now receive the
+  error. Custom senders used with `runLambda` must override `sendPackets`.
+  `UdpSender`, `InMemorySender`, and `NoopSender` are unchanged.
+
 ### Fixed
 
 - **`onSendError` now fires for transport failures.** The `UdpSender` the

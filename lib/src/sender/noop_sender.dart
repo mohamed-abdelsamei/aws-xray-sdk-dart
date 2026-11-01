@@ -7,5 +7,8 @@ final class NoopSender extends Sender {
   Future<void> send(Segment segment) async {}
 
   @override
+  Future<void> sendPackets(List<List<int>> packets) async {}
+
+  @override
   Future<void> close() async {}
 }

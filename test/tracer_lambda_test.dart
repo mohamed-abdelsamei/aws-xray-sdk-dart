@@ -50,6 +50,14 @@ class _ThrowingPacketSender extends Sender {
   Future<void> close() async {}
 }
 
+// A custom sender that implements only send/close (AC9.1).
+class _SendOnlySender extends Sender {
+  @override
+  Future<void> send(Segment segment) async {}
+  @override
+  Future<void> close() async {}
+}
+
 class _JsonThrowingSender extends Sender {
   @override
   Future<void> send(Segment segment) async {}
@@ -464,6 +472,59 @@ void main() {
       );
       expect(sender.packets, hasLength(1));
       expect(sender.lastDoc['fault'], isTrue);
+    });
+  });
+
+  group('XRayTracer.runLambda — custom senders (AC9)', () {
+    test('a send-only custom Sender reports UnsupportedError via onSendError',
+        () async {
+      final errors = <Object>[];
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: _SendOnlySender(),
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) => errors.add(e),
+      );
+
+      final result =
+          await t.runLambda(traceId, parentId, 'handler', () async => 7);
+
+      expect(result, 7);
+      expect(errors, hasLength(1));
+      expect(
+        errors.single,
+        isA<UnsupportedError>()
+            .having((e) => e.message, 'message', contains('_SendOnlySender'))
+            .having((e) => e.message, 'message', contains('runLambda')),
+      );
+    });
+
+    test('InMemorySender still captures the lambda packet', () async {
+      final mem = InMemorySender();
+      final errors = <Object>[];
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: mem,
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) => errors.add(e),
+      );
+      await t.runLambda(traceId, parentId, 'handler', () async {});
+      expect(mem.packets, hasLength(1));
+      expect(errors, isEmpty);
+    });
+
+    test('NoopSender stays a silent no-op', () async {
+      final errors = <Object>[];
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: NoopSender(),
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) => errors.add(e),
+      );
+      expect(await t.runLambda(traceId, parentId, 'handler', () async => 1), 1);
+      expect(errors, isEmpty);
+      await expectLater(
+          NoopSender().sendPackets([utf8.encode('x')]), completes);
     });
   });
 }
