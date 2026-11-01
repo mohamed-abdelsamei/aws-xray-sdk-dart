@@ -122,6 +122,15 @@ When the SDK injects `X-Amzn-Trace-Id`, the emitted subsegment records:
   If a `?` or `#` comes before an `@`, that `@` may be part of a query: only a
   valid `host[:port]` before the `?` or `#` is kept, the rest is dropped.
   Before 0.5.0 the full URL, query string included, was recorded.
+- `aws.queue_url` and every `aws.resource_names` entry share one redaction
+  when the document is emitted: the whole value is redacted like a URL, then
+  every URL found in what is left (several URLs, or text around one) loses
+  userinfo, query and fragment. Values containing no scheme-style `:/` or
+  `:\` are left as they are (table and bucket names, ARNs) unless the entry equals `queue_url`, and a
+  plain queue URL is unchanged. A hand-built `AwsData` whose `resource_names` holds a
+  credentialed string with no scheme (`user:pw@host/path`) that is not the
+  `queue_url` is not redacted; the built-in producers never create one. The
+  in-memory `AwsData` keeps raw values. The other `aws` fields are recorded as given.
 - URLs inside `cause.exceptions[].message` are redacted with the same rule
   before the message is capped at 1024 characters, so a URL cut by the cap
   cannot leave part of a password behind. This covers messages from caught

@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 // ignore: implementation_imports
+import 'package:aws_xray_sdk/src/wrappers/resource_extractor.dart';
+// ignore: implementation_imports
 import 'package:aws_xray_sdk/src/wrappers/xray_interceptor.dart';
 import 'package:test/test.dart';
 
@@ -101,6 +103,38 @@ void main() {
       await send(_Req(url: 'https://example.com'));
       expect(innerCalled, isTrue);
       expect(sender.sent, isEmpty); // nothing sent — no active segment
+    });
+
+    test('redacts the queue url from the built-in sqs extractor', () async {
+      const raw = 'https://u:p@sqs.us-east-1.amazonaws.com/123/q?X=1#f';
+      final interceptor = XRayInterceptor<_Req, _Res>(
+        tracer: tracer,
+        namespace: 'remote',
+        extractor: builtInExtractors['SqsClient']!,
+        requestAdapter: (req) => (
+          operationName: 'SendMessage',
+          method: 'POST',
+          url: req.url,
+          body: const {'QueueUrl': raw},
+          withTraceHeader: (r, h) => r.withHeader(h),
+        ),
+        responseAdapter: (res) => (
+          statusCode: res.statusCode,
+          contentLength: null,
+          requestId: null,
+          region: null,
+          errorCode: null,
+        ),
+      );
+      final send = interceptor.wrap((req) async => const _Res(200));
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment,
+          () => send(_Req(url: 'https://sqs.us-east-1.amazonaws.com/')));
+
+      final aws = sender.firstSub['aws'] as Map;
+      expect(aws['queue_url'], 'https://sqs.us-east-1.amazonaws.com/123/q');
+      expect(jsonEncode(sender.lastSegment), isNot(contains('u:p@')));
     });
 
     test('injects X-Amzn-Trace-Id header on the request', () async {

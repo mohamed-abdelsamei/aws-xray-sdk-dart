@@ -317,6 +317,26 @@ void main() {
       expect((sub['http'] as Map)['response']['content_length'], 11);
     });
 
+    test('redacts the sqs queue url in queue_url and resource_names', () async {
+      const raw = 'https://u:p@sqs.us-east-1.amazonaws.com/123/q?X=1#f';
+      const clean = 'https://sqs.us-east-1.amazonaws.com/123/q';
+      final client = XRayBaseClient(_MockClient(200), tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.post(
+          Uri.parse('https://sqs.us-east-1.amazonaws.com/'),
+          headers: {'X-Amz-Target': 'AmazonSQS.SendMessage'},
+          body: jsonEncode({'QueueUrl': raw, 'MessageBody': 'hi'}),
+        );
+      });
+
+      final aws = (sender.lastSubs.first as Map)['aws'] as Map;
+      expect(aws['queue_url'], clean);
+      expect(aws['resource_names'], [clean]);
+      expect(jsonEncode(sender.last), isNot(contains('u:p@')));
+    });
+
     test('attaches aws operation + topic_arn from query request', () async {
       final inner = _MockClient(200);
       final client = XRayBaseClient(inner, tracer);
