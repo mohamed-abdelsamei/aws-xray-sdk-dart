@@ -93,6 +93,15 @@ final class Segment {
 
   Segment withThrottle() => _copyWith(throttle: true, error: true);
 
+  /// Applies fault/error/throttle flags based on an HTTP status code: 429 is a
+  /// throttle (and error), other 4xx an error, 5xx a fault.
+  Segment applyStatus(int statusCode) {
+    if (statusCode == 429) return withThrottle();
+    if (statusCode >= 500) return withFault();
+    if (statusCode >= 400) return withError();
+    return this;
+  }
+
   Segment addSubsegment(Subsegment sub) =>
       _copyWith(subsegments: [...subsegments, sub]);
 

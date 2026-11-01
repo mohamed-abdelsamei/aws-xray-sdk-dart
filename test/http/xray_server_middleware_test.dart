@@ -229,4 +229,73 @@ void main() {
       expect(captured!.traceId.toString(), upstreamTrace.toString());
     });
   });
+
+  group('handleTraced response status flags', () {
+    late HttpServer server;
+    late InMemorySender sender;
+
+    tearDown(() async {
+      await server.close(force: true);
+    });
+
+    // Serves one request whose handler runs [handler], and returns the
+    // segment the tracer sent for it.
+    Future<Segment> serve(Future<void> Function(HttpResponse) handler) async {
+      sender = InMemorySender();
+      final tracer = XRayTracer(
+        serviceName: 'edge-svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+      );
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((req) async {
+        try {
+          await handleTraced(req, tracer, () => handler(req.response));
+        } catch (_) {
+          req.response.statusCode = 500;
+        }
+        await req.response.close();
+      });
+
+      final client = HttpClient();
+      final req = await client
+          .getUrl(Uri.parse('http://127.0.0.1:${server.port}/orders'));
+      final res = await req.close();
+      await res.drain<void>();
+      client.close();
+      return sender.segments.single;
+    }
+
+    Future<Segment> serveStatus(int status) =>
+        serve((response) async => response.statusCode = status);
+
+    test('200 sets no flags', () async {
+      final seg = await serveStatus(200);
+      expect(seg.http?.response?.status, 200);
+      expect((seg.error, seg.throttle, seg.fault), (false, false, false));
+    });
+
+    test('404 sets error only', () async {
+      final seg = await serveStatus(404);
+      expect((seg.error, seg.throttle, seg.fault), (true, false, false));
+    });
+
+    test('429 sets throttle and error', () async {
+      final seg = await serveStatus(429);
+      expect((seg.error, seg.throttle, seg.fault), (true, true, false));
+    });
+
+    test('500 sets fault only', () async {
+      final seg = await serveStatus(500);
+      expect((seg.error, seg.throttle, seg.fault), (false, false, true));
+    });
+
+    test('a throwing handler records a fault with its cause and no status',
+        () async {
+      final seg = await serve((_) async => throw StateError('boom'));
+      expect(seg.http?.response, isNull);
+      expect((seg.error, seg.throttle, seg.fault), (false, false, true));
+      expect(seg.cause?.exceptions.single.message, contains('boom'));
+    });
+  });
 }

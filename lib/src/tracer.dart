@@ -233,7 +233,12 @@ final class XRayTracer {
       fn,
       sampled: sampled,
       onComplete: (root) async {
-        await closeSegment(root.applyToSegment(segment));
+        final closed = root.applyToSegment(segment);
+        // A recorded response status (set by the server middleware) flags the
+        // segment the same way client subsegments are flagged.
+        final status = closed.http?.response?.status;
+        await closeSegment(
+            status == null ? closed : closed.applyStatus(status));
       },
     );
   }
