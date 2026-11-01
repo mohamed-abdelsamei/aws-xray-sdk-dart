@@ -177,8 +177,10 @@ For exact runtime contracts and edge-case behavior, see
 - Closing a subsegment is idempotent; a second close or a late close after an
   incomplete sweep does not duplicate the id or overwrite the first outcome.
 - Segment delivery is conditional on the sampling decision.
-- Sender failures are contained at the tracer boundary; `UdpSender` is silent by
-  default and exposes an optional `onError` callback for local transport errors.
+- Sender failures are contained at the tracer boundary. The tracer-built
+  `UdpSender` reports local transport errors to `XRayTracer.onSendError` (at
+  most once per send); a user-constructed `UdpSender` is silent by default and
+  exposes an optional `onError` callback instead.
 
 ## Supported runtime constraints
 

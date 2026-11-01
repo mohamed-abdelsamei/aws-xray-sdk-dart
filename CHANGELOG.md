@@ -13,14 +13,18 @@
 
 ### Changed
 
-- **Recorded URLs no longer include query strings, userinfo, or fragments.**
-  `http.request.url` is now `scheme://host[:port]/path` on every path
-  (`XRayHttpClient`, `XRayBaseClient`, `XRay.fromClient`, `handleTraced`, and
-  user-built `HttpRequestData`), so presigned-URL signatures, OAuth codes, and
-  `user:pw@` credentials stay out of X-Ray. There is no setting to keep the
-  query string. The in-memory `HttpRequestData.url` keeps the raw value; only
-  the emitted document is redacted.
-- **`Sender.sendPackets` now throws `UnsupportedError` by default.** It was a
+Both entries below change observable behaviour; review them before upgrading.
+
+- **Behaviour change — recorded URLs no longer include query strings,
+  userinfo, or fragments.** `http.request.url` is now
+  `scheme://host[:port]/path` on every instrumentation path (`XRayHttpClient`,
+  `XRayBaseClient`, `XRay.fromClient`, `handleTraced`, and user-built
+  `HttpRequestData`), so presigned-URL signatures, OAuth codes, and `user:pw@`
+  credentials stay out of X-Ray. There is no setting to keep the query string.
+  The in-memory `HttpRequestData.url` keeps the raw value; only the emitted
+  document is redacted. Exception messages in `cause` may still contain URLs.
+- **Behaviour change — `Sender.sendPackets` now throws `UnsupportedError` by
+  default.** It was a
   silent no-op, so a custom `Sender` that only overrode `send` lost every
   `runLambda` trace without notice. The error names the sender class; the
   tracer reports it through `onSendError` (when set) and never throws into
@@ -46,7 +50,7 @@
   reports those local failures too, at most once per segment send, and never
   throws into the app. `runLambda` also reports a document that fails to
   encode (such as a cyclic metadata map) instead of dropping it silently. A
-  user-supplied `Sender` is unchanged.
+  user-supplied `UdpSender` keeps reporting through its own `onError`.
 - **Large Lambda traces are no longer dropped.** `runLambda` sent the
   whole handler subsegment tree as a single UDP datagram, so a large
   invocation exceeded the datagram limit and the entire trace was lost.
@@ -65,7 +69,8 @@
   back to `127.0.0.1:2000` instead of producing a half-parsed address.
 - **Malformed incoming trace headers no longer leak into traces.**
   `TraceId.tryParse` (and so `TraceId.parseRootString`) now requires hex in
-  the timestamp and random parts (non-hex ids were accepted and later failed an assert in debug builds).
+  the timestamp and random parts (non-hex ids were accepted and later failed
+  an assert in debug builds).
   `handleTraced`, `tracer.trace()` and `LambdaTraceCapture.context()` drop
   `Parent` when the `Root` is invalid (a fresh trace is started) or the parent
   is not 16 hex characters.

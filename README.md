@@ -437,18 +437,13 @@ subsegment document to land in a separate, unlinked trace.
 
 Lambda injects the daemon address via `AWS_XRAY_DAEMON_ADDRESS`. Do **not**
 hardcode `127.0.0.1:2000` — newer Lambda environments use a link-local address
-(`169.254.100.1:2000`). The recommended setup:
+(`169.254.100.1:2000`). The recommended setup lets `XRay.configure()` read and
+parse it — including the `[v6]:port`, bare IPv6, and `tcp:… udp:…` forms; a
+malformed value falls back to `127.0.0.1:2000`:
 
 ```dart
-(String host, int port) _daemonAddress() {
-  final raw = Platform.environment['AWS_XRAY_DAEMON_ADDRESS'] ?? '127.0.0.1:2000';
-  final colon = raw.lastIndexOf(':');
-  return colon == -1 ? (raw, 2000) : (raw.substring(0, colon), int.parse(raw.substring(colon + 1)));
-}
-
-final tracer = XRayTracer(
-  serviceName: Platform.environment['AWS_LAMBDA_FUNCTION_NAME'] ?? 'my-function',
-  sender: UdpSender(host: host, port: port),
+final tracer = XRay.configure(
+  // serviceName defaults to AWS_LAMBDA_FUNCTION_NAME
   sampling: FixedRateSampler(1.0),  // Lambda decides sampling; always forward to daemon
 );
 ```
@@ -594,8 +589,10 @@ XRayTracer(serviceName: 'svc',
 ```
 
 `UdpSender` never throws into your traced code — a resolution, bind, or send
-failure is contained. To observe **local** send failures, pass an `onError`
-callback (silent by default):
+failure is contained. When the tracer builds its own `UdpSender` (no `sender`
+argument), local send failures are reported to the tracer's `onSendError`
+callback, at most once per segment. For a `UdpSender` you construct yourself,
+pass an `onError` callback (silent by default):
 
 ```dart
 XRayTracer(
