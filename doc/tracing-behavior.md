@@ -128,7 +128,8 @@ When the SDK injects `X-Amzn-Trace-Id`, the emitted subsegment records:
   userinfo, query and fragment. Values containing no scheme-style `:/` or
   `:\` are left as they are (table and bucket names, ARNs) unless the entry equals `queue_url`, and a
   plain queue URL is unchanged. A hand-built `AwsData` whose `resource_names` holds a
-  credentialed string with no scheme (`user:pw@host/path`) that is not the
+  credentialed string with no scheme (`user:pw@host/path`) or a protocol-relative
+  `//user:pw@host/path` that is not the
   `queue_url` is not redacted; the built-in producers never create one. The
   in-memory `AwsData` keeps raw values. The other `aws` fields are recorded as given.
 - URLs inside `cause.exceptions[].message` are redacted with the same rule
@@ -436,7 +437,11 @@ status flags, `name` cut to 200 UTF-16 code units) plus the marker; `user`,
 model is never changed, and a node that already fits is sent unchanged.
 
 The encoder's output fits the datagram (assuming normal-length ids; packets given directly to `sendPackets` are not checked), but it does not guarantee the X-Ray service
-accepts or samples the trimmed document. Metadata is not indexed, so the
+accepts or samples the trimmed document. The service's behaviour on a trimmed
+document has not been verified end to end (a string now stands where a metadata
+map value was), and the exact service-side size limit (64000 vs 65536 bytes) is
+unconfirmed, so a trimmed document close to the limit may still be rejected.
+Metadata is not indexed, so the
 marker cannot be used as a filter in X-Ray. Code that reads the document back
 will see a string where a metadata value used to be. The macOS local limit
 (9216 bytes by default) is separate and still applies in local development.

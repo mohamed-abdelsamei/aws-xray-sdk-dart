@@ -96,6 +96,24 @@ void main() {
         }
       });
 
+      test('scheme-less credentialed forms are redacted only as queue_url', () {
+        for (final form in [
+          '//user:SECRETPW@h.example/q',
+          'user:SECRETPW@h.example/1/q'
+        ]) {
+          final asEntry = AwsData(operation: 'X', resourceNames: [form]);
+          expect(asEntry.toJson()['resource_names'], [form], reason: form);
+
+          final asQueue = AwsData(
+            operation: 'X',
+            queueUrl: form,
+            resourceNames: [form],
+          );
+          final out = jsonEncode(asQueue.toJson());
+          expect(out, isNot(contains('SECRETPW')), reason: form);
+        }
+      });
+
       test('non-url resource_names entries are unchanged', () {
         const names = [
           'orders',

@@ -660,7 +660,10 @@ automatically split into a skeleton segment plus one independent subsegment
 document per subsegment. A single node that is still too large has its largest
 `metadata` values replaced with `[truncated: N bytes]` (and
 `metadata.xray.truncated` set) so the datagram fits; see
-`doc/tracing-behavior.md`.
+`doc/tracing-behavior.md`. The service's behaviour on a trimmed document has
+not been verified end to end (a string now stands where a metadata map value
+was), and the exact service-side size limit (64000 vs 65536 bytes) is
+unconfirmed, so a trimmed document close to the limit may still be rejected.
 
 ---
 

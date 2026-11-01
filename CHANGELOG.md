@@ -12,7 +12,8 @@
   X-Ray. Table and bucket names, ARNs, and plain queue URLs are unchanged. The
   in-memory `AwsData` keeps raw values. Accepted limit: a hand-built `AwsData`
   whose `resource_names` holds scheme-less credentials (`user:pw@host/path`)
-  that differ from `queue_url` is not redacted; the built-in producers never
+  or a protocol-relative `//user:pw@host/path` form that differs from
+  `queue_url` is not redacted; the built-in producers never
   create one.
 
 ### Fixed
@@ -30,7 +31,11 @@
   **Behaviour change:** an emitted document can now differ from the recorded
   one, and a string can appear where a `metadata` map value used to be. The
   fix guarantees the packet fits the datagram, not that the X-Ray service
-  accepts it. Ids passed directly to `runLambda` are not capped, so a huge id
+  accepts it. The service's behaviour on a trimmed document has not been
+  verified end to end (a string now stands where a metadata map value was),
+  and the exact service-side size limit (64000 vs 65536 bytes) is unconfirmed,
+  so a trimmed document close to the limit may still be rejected by the
+  service. Ids passed directly to `runLambda` are not capped, so a huge id
   can still exceed the limit.
 
 ## 0.5.0

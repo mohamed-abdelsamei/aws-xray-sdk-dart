@@ -171,7 +171,9 @@ A UDP datagram over IPv4 carries at most **65507 bytes** (65535 − 8 UDP header
 − 20 IP header). `encode()` splits an oversized segment into a skeleton segment
 plus independent subsegment documents, recursing into nested children; the
 Lambda path (`encodeSubsegmentDocs()`) splits the same way. A single node that is
-over the cap on its own is still sent whole (known gap).
+over the cap on its own is trimmed to fit (largest metadata values replaced by a
+`[truncated: N bytes]` marker, then a bare node as a last resort); nodes that
+fit are unchanged.
 
 ### Redaction at serialization
 
