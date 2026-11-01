@@ -330,6 +330,7 @@ publish, dispatch **Publish to pub.dev** on the existing tag.
 - PR titles and commits are Conventional Commits with a **lowercase subject** (enforced by `commitlint.yml`); use `fix!:` / `feat!:` only for breaking API or contract changes (behaviour changes that are not breaking get a plain `fix:`/`feat:` and a CHANGELOG note).
 - `feat` / `fix` / `perf` / breaking changes get a `CHANGELOG.md` entry under a `## X.Y.Z` heading — never `## Unreleased`, which the release workflow does not recognise.
 - Don't bump `pubspec.yaml`'s version; the Release workflow does it.
+- Keep the docs and examples in step with the code. When a change alters public API, observable behaviour, a default, or a documented limit, update in the same PR: the matching sections of `README.md` and `doc/` (behaviour contracts, limits, package layout), the dartdoc on the changed API, and `example/` (edit an example that the change makes wrong; add a runnable one, listed in `example/README.md`, for a new public feature). Run any example you add or change. If a change needs none of this, say so in the PR description. Don't document internal-only changes.
 
 ---
 

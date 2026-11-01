@@ -51,6 +51,7 @@ invoke — so a slow dependency is obvious at a glance in the X-Ray service map.
 | ☁️ **AWS SDK client wrapping** | Instrument any Smithy-generated client (DynamoDB, S3, KMS, …) via `XRay.fromClient<T>()` |
 | λ **Lambda-native** | `runLambda()` attaches to the auto-created Lambda segment instead of competing with it |
 | 📡 **UDP-first transport** | Fire-and-forget to the X-Ray daemon; reads `AWS_XRAY_DAEMON_ADDRESS` automatically |
+| 🩺 **Diagnostics hook** | `onDiagnostic` reports contained problems (trimmed oversized nodes, throwing client adapters, a bad daemon address) that would otherwise be silent |
 | 🎛️ **Flexible sampling** | Fixed-rate and reservoir samplers; pluggable `SamplingStrategy` interface |
 | 🔒 **Zone-based context** | Sampling decision and active segment flow across `await` chains with no manual threading |
 | 🧊 **AOT-safe** | Zero `dart:mirrors`; no `build_runner` step — compiles with `dart compile exe` |
@@ -608,15 +609,18 @@ XRayTracer(
 
 UDP is **fire-and-forget with no delivery acknowledgment** — a datagram sent to
 a daemon that isn't listening still succeeds locally, so the SDK cannot tell you
-"the daemon didn't receive it" (and `onError` only fires on *local* failures
-like an unreachable network or a failed DNS lookup). If segments aren't
+"the daemon didn't receive it" (and `onError`, or `onSendError` on the
+tracer, only fires on *local* failures like an unreachable network or a failed
+DNS lookup). If segments aren't
 appearing in the X-Ray console, work down this list:
 
 1. **Is the daemon running and reachable?** Start it in verbose mode and watch
    its own logs for received segments: `amazon/aws-xray-daemon -o -l dev`.
 2. **Is the address right?** The default is `127.0.0.1:2000`. On newer Lambda
    runtimes it is the link-local `AWS_XRAY_DAEMON_ADDRESS` (e.g.
-   `169.254.100.1:2000`) — read it at cold start, don't hardcode.
+   `169.254.100.1:2000`) — read it at cold start, don't hardcode. A malformed
+   `AWS_XRAY_DAEMON_ADDRESS` falls back to the default and is reported once (see
+   [Diagnostics hook](#diagnostics-hook)).
 3. **Is the segment sampled?** With `FixedRateSampler(0.05)` only ~5% of traces
    are sent. Use `FixedRateSampler(1.0)` while verifying.
 4. **Did the segment close?** A segment is only sent after `run()` /
@@ -660,6 +664,9 @@ report `node_trimmed`. It can fire often, so
 rate-limit inside the callback. It does not receive send failures; those go to
 `onSendError`. `XRay.configure` also accepts `onSendError` and `onSampledDrop`;
 all three are ignored when you pass a prebuilt `tracer:`.
+
+A runnable version that triggers `node_trimmed` and `adapter_failed` without a
+daemon is in [`example/diagnostics_example.dart`](example/diagnostics_example.dart).
 
 ---
 
@@ -731,8 +738,9 @@ XRayTracer.run / runLambda        Zone stores: Segment, TraceState (entity
        ▼
    finally block (run path)        runLambda path
        │
-       ├── encode(segment)         encodeSubsegmentDoc()
-       │                           (independent subsegment)
+       ├── encode(segment)         encodeSubsegmentDocs()
+       │  (split oversized,        (independent subsegment docs)
+       │   trim oversized nodes)
        └── UdpSender.send          UdpSender.sendPackets
            fire-and-forget UDP → 127.0.0.1:2000
 ```
@@ -752,6 +760,7 @@ lib/
     tracer.dart                  # XRayTracer — trace(), run(), runLambda(), captureAsync(), annotate(), subsegment API
     xray.dart                    # XRay facade — trace(), capture(), patchHttp(), fromClient<T>(), untracedHttpClient()
     utils.dart                   # randomHex(), nowSeconds()
+    diagnostic.dart              # XRayDiagnostic — payload for the onDiagnostic hook
     context/
       trace_scope.dart           # TraceScope / TraceContext — live runtime entity tree (mutable, serialized at close)
       trace_suppression.dart     # runWithoutDartIoTracing() — avoids double-tracing under patchHttp
@@ -771,9 +780,11 @@ lib/
     sender/
       sender.dart                # Sender abstract class  (send, close, sendPackets)
       udp_sender.dart            # UdpSender     — fire-and-forget UDP
+      daemon_address.dart        # parseDaemonAddress() — AWS_XRAY_DAEMON_ADDRESS forms
+      daemon_address_warning.dart# reports a malformed daemon address once per install
       noop_sender.dart           # NoopSender    — discard (local dev)
       in_memory_sender.dart      # InMemorySender — capture segments/packets for tests
-      segment_encoder.dart       # encode(), encodeSubsegmentDoc()
+      segment_encoder.dart       # encode(), encodeSubsegmentDocs() — split + trim to fit
     http/
       xray_http_client.dart      # XRayHttpClient  — wraps dart:io HttpClient
       xray_http_overrides.dart   # XRayHttpOverrides — global dart:io patch
@@ -873,6 +884,9 @@ dart run example/aws_sdk_tracing.dart
 
 # Server-side tracing with handleTraced
 dart run example/server_middleware.dart
+
+# Diagnostics hooks (onDiagnostic / onSendError / onSampledDrop), no daemon needed
+dart run example/diagnostics_example.dart
 ```
 
 The full set of runnable examples lives in [`example/`](example/) — see its
