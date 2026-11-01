@@ -32,12 +32,11 @@ Future<T> handleTraced<T>(
 }) async {
   final upstreamHeader = request.headers.value('x-amzn-trace-id') ?? '';
   final upstreamTraceId = TraceId.tryParse(upstreamHeader);
-  final parentId = TraceId.parseParentId(upstreamHeader);
 
   final segment = Segment.begin(
     name: serviceName ?? tracer.serviceName,
     traceId: upstreamTraceId ?? TraceId.generate(),
-    parentId: parentId,
+    parentId: validParentId(upstreamHeader),
   );
 
   final method = request.method;

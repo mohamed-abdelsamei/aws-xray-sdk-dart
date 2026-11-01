@@ -3,6 +3,7 @@ import 'dart:io';
 import 'models/http_data.dart';
 import 'models/segment.dart';
 import 'models/subsegment.dart';
+import 'models/trace_header.dart' show validParentId;
 import 'models/trace_id.dart';
 import 'sampling/fixed_rate_sampler.dart';
 import 'sampling/sampling_strategy.dart';
@@ -25,6 +26,51 @@ final _currentScopeKey = #_xrayCurrentScope;
 
 // Zone key for the sampling decision made at run() entry.
 final _sampledKey = #_xraySampled;
+
+// Zone key for the [_SendReport] of the segment send in progress.
+final _sendReportKey = #_xraySendReport;
+
+/// One segment send's failure report: forwards the first error to the
+/// tracer's `onSendError` and ignores the rest (at most once per send).
+final class _SendReport {
+  _SendReport(this.segment, this.onSendError);
+  final Segment segment;
+  final void Function(Segment segment, Object error)? onSendError;
+  bool _reported = false;
+
+  void notify(Object error) {
+    if (_reported) return;
+    _reported = true;
+    XRayTracer._safeNotify(() => onSendError?.call(segment, error));
+  }
+}
+
+/// Internal test seam, hidden from the package barrel: a tracer whose
+/// self-built [UdpSender] uses the injected [resolver] / [socketFactory], so
+/// transport failures can be exercised without a real socket.
+XRayTracer newTracerWithUdpSeamsForTesting({
+  required String serviceName,
+  SamplingStrategy? sampling,
+  ContextMissingPolicy contextMissingPolicy = ContextMissingPolicy.ignore,
+  String daemonHost = '127.0.0.1',
+  int daemonPort = 2000,
+  void Function(Segment segment)? onSampledDrop,
+  void Function(Segment segment, Object error)? onSendError,
+  Future<InternetAddress> Function(String host)? resolver,
+  Future<RawDatagramSocket> Function(InternetAddressType family)? socketFactory,
+}) =>
+    XRayTracer._(
+      serviceName: serviceName,
+      sender: null,
+      sampling: sampling,
+      contextMissingPolicy: contextMissingPolicy,
+      daemonHost: daemonHost,
+      daemonPort: daemonPort,
+      onSampledDrop: onSampledDrop,
+      onSendError: onSendError,
+      resolver: resolver,
+      socketFactory: socketFactory,
+    );
 
 /// What to do when a subsegment is recorded but there is no active trace in
 /// the current zone to attach it to (the data would otherwise be dropped).
@@ -71,15 +117,48 @@ bool get isDefaultTracerConfigured => _defaultTracer != null;
 /// ```
 final class XRayTracer {
   XRayTracer({
-    required this.serviceName,
+    required String serviceName,
     Sender? sender,
     SamplingStrategy? sampling,
-    this.contextMissingPolicy = ContextMissingPolicy.ignore,
+    ContextMissingPolicy contextMissingPolicy = ContextMissingPolicy.ignore,
     String daemonHost = '127.0.0.1',
     int daemonPort = 2000,
-    this.onSampledDrop,
-    this.onSendError,
-  })  : _sender = sender ?? UdpSender(host: daemonHost, port: daemonPort),
+    void Function(Segment segment)? onSampledDrop,
+    void Function(Segment segment, Object error)? onSendError,
+  }) : this._(
+          serviceName: serviceName,
+          sender: sender,
+          sampling: sampling,
+          contextMissingPolicy: contextMissingPolicy,
+          daemonHost: daemonHost,
+          daemonPort: daemonPort,
+          onSampledDrop: onSampledDrop,
+          onSendError: onSendError,
+        );
+
+  /// The single real-tracer constructor. [resolver] / [socketFactory] are
+  /// test seams for the tracer-built [UdpSender], reachable only via
+  /// [newTracerWithUdpSeamsForTesting] (hidden from the package barrel).
+  XRayTracer._({
+    required this.serviceName,
+    required Sender? sender,
+    required SamplingStrategy? sampling,
+    required this.contextMissingPolicy,
+    required String daemonHost,
+    required int daemonPort,
+    required this.onSampledDrop,
+    required this.onSendError,
+    Future<InternetAddress> Function(String host)? resolver,
+    Future<RawDatagramSocket> Function(InternetAddressType family)?
+        socketFactory,
+  })  : _sender = sender ??
+            UdpSender(
+              host: daemonHost,
+              port: daemonPort,
+              onError: _reportTransportError,
+              resolver: resolver,
+              socketFactory: socketFactory,
+            ),
         _sampling = sampling ?? FixedRateSampler(0.05),
         _failOpen = true;
 
@@ -103,10 +182,13 @@ final class XRayTracer {
   /// failure ([onSendError]); both otherwise leave no trace. Must not throw.
   final void Function(Segment segment)? onSampledDrop;
 
-  /// Called when [Sender.send] throws while finalizing a sampled segment (an
-  /// **unintentional** drop — daemon down, serialization error). The error is
-  /// still swallowed so tracing never faults the app; this is the observability
-  /// hook. Must not throw.
+  /// Called when sending a sampled segment fails (an **unintentional** drop —
+  /// serialization error, or a sender that throws). When the tracer builds its
+  /// own [UdpSender] (no `sender` argument), local transport failures it
+  /// contains (resolve, bind, datagram send) are reported here too; UDP still
+  /// cannot detect a daemon that is not listening. Fires at most once per
+  /// send. The error is still swallowed so tracing never faults the app; this
+  /// is the observability hook. Must not throw.
   final void Function(Segment segment, Object error)? onSendError;
 
   /// How a recorded subsegment with no active trace context is handled.
@@ -151,7 +233,12 @@ final class XRayTracer {
       fn,
       sampled: sampled,
       onComplete: (root) async {
-        await closeSegment(root.applyToSegment(segment));
+        final closed = root.applyToSegment(segment);
+        // A recorded response status (set by the server middleware) flags the
+        // segment the same way client subsegments are flagged.
+        final status = closed.http?.response?.status;
+        await closeSegment(
+            status == null ? closed : closed.applyStatus(status));
       },
     );
   }
@@ -189,7 +276,7 @@ final class XRayTracer {
     final segment = Segment.begin(
       name: name,
       traceId: upstream ?? TraceId.generate(),
-      parentId: upstream == null ? null : TraceId.parseParentId(traceHeader!),
+      parentId: traceHeader == null ? null : validParentId(traceHeader),
       user: user,
     );
     return run(
@@ -207,7 +294,9 @@ final class XRayTracer {
   /// silently drops), this method emits a single **independent subsegment
   /// document** whose `parent_id` is [lambdaParentId] — the ID of the
   /// auto-created function segment taken from the `Parent=` field of the
-  /// `Lambda-Runtime-Trace-Id` header.
+  /// `Lambda-Runtime-Trace-Id` header. If that document would exceed the
+  /// 65507-byte UDP datagram cap, its children are split out into separate linked
+  /// subsegment documents (see `encodeSubsegmentDocs`).
   ///
   /// All subsegments opened during [fn] (via [beginSubsegment] /
   /// [endSubsegment] / [failSubsegment]) are embedded inside the handler
@@ -251,19 +340,22 @@ final class XRayTracer {
           _safeNotify(() => onSampledDrop?.call(virtualSegment));
           return;
         }
-        final doc = root.toSubsegment().toJson()..remove('namespace');
-        final packet = encodeSubsegmentDoc(
-          doc,
-          lambdaParentId,
-          traceId.toString(),
-        );
-        try {
-          await _sender.sendPackets([packet]);
-        } catch (e) {
-          // Same containment + observability contract as closeSegment: never
-          // fault the invocation, but surface the unintentional drop.
-          _safeNotify(() => onSendError?.call(virtualSegment, e));
-        }
+        // Same containment + observability contract as closeSegment: never
+        // fault the invocation, but surface the unintentional drop. Encoding
+        // is inside the guard so an unencodable document (e.g. a cyclic map)
+        // is reported rather than silently lost.
+        await _sendReported(virtualSegment, () {
+          final sub = root.toSubsegment();
+          // Split like encode() so an oversized handler doc stays within the
+          // 65507-byte UDP datagram cap; the root's `namespace` is dropped.
+          final packets = encodeSubsegmentDocs(
+            sub,
+            lambdaParentId,
+            traceId.toString(),
+            json: sub.toJson()..remove('namespace'),
+          );
+          return _sender.sendPackets(packets);
+        });
       },
     );
   }
@@ -551,19 +643,40 @@ final class XRayTracer {
       _safeNotify(() => onSampledDrop?.call(segment));
       return;
     }
+    await _sendReported(segment, () => _sender.send(segment));
+  }
+
+  /// Runs [send] with failures contained and reported to [onSendError] at most
+  /// once for [segment].
+  ///
+  /// A thrown error is reported here. A transport failure that the
+  /// tracer-built [UdpSender] contains itself reaches [_reportTransportError]
+  /// through the zone value set below, which reports to the same
+  /// [_SendReport], so one send never fires the hook twice.
+  Future<void> _sendReported(
+    Segment segment,
+    Future<void> Function() send,
+  ) async {
+    final report = _SendReport(segment, onSendError);
     try {
-      await _sender.send(segment);
+      await runZoned(send, zoneValues: {_sendReportKey: report});
     } catch (e) {
       // Intentionally ignored — tracing must never break the application — but
       // surfaced via the observability hook so an unintentional drop is not
       // indistinguishable from a sampled-out one.
-      _safeNotify(() => onSendError?.call(segment, e));
+      report.notify(e);
     }
   }
 
+  /// `onError` for the tracer-built [UdpSender]: routes a contained transport
+  /// failure to the [_SendReport] of the send in progress, if any. Static so
+  /// it can sit in the constructor initializer.
+  static void _reportTransportError(Object error) =>
+      (Zone.current[_sendReportKey] as _SendReport?)?.notify(error);
+
   /// Invokes an observability callback, swallowing any throw it makes so a
   /// misbehaving hook can never fault the traced operation.
-  void _safeNotify(void Function() notify) {
+  static void _safeNotify(void Function() notify) {
     try {
       notify();
     } catch (_) {/* a hook must never break tracing */}

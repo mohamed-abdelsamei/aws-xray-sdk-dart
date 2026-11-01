@@ -126,7 +126,12 @@ Future<void> processOrder(String orderId) =>
 
 Two ways to trace outbound HTTP, both injecting `X-Amzn-Trace-Id`, recording
 the request URL and response status, marking HTTP errors, and closing the
-subsegment when the response body stream finishes.
+subsegment when the response body stream finishes. `http.request.url` is
+recorded as `scheme://host[:port]/path`, without userinfo, query string, or
+fragment. URLs inside exception messages in a subsegment `cause` are
+redacted the same way before the message is capped at 1024 characters.
+Encoded URLs, userinfo containing whitespace, and URLs without a scheme are
+not caught; see `doc/tracing-behavior.md` for the full list.
 
 ### `dart:io` — global patch
 
@@ -355,6 +360,22 @@ The response adapter fields map directly to X-Ray metadata:
 - `errorCode` is used to mark AWS throttles even when the HTTP status is not
   `429`.
 
+Smithy clients throw on 4xx responses as well as 5xx, and a thrown call is
+recorded as a fault by default. Pass the optional `errorStatus` hook to report
+the HTTP status carried by the error, so it is classified like a response
+(4xx error, 429 throttle, 5xx fault) and recorded as `http.response.status`:
+
+```dart
+XRay.registerClient<DynamoDbClient>(
+  // requestAdapter, responseAdapter, rebuild as above
+  errorStatus: (e) => e is SmithyHttpException ? e.statusCode : null,
+);
+```
+
+Returning `null` (or a status below 400), or throwing, keeps the default:
+fault, or throttle when the error matches a known throttle code. The original
+error is always rethrown unchanged.
+
 Registered client namespaces are normalized to X-Ray schema values. Use `aws`
 for AWS service clients and `remote` for other downstream clients; legacy
 `AWS::...` values are treated as `aws`.
@@ -418,18 +439,13 @@ subsegment document to land in a separate, unlinked trace.
 
 Lambda injects the daemon address via `AWS_XRAY_DAEMON_ADDRESS`. Do **not**
 hardcode `127.0.0.1:2000` — newer Lambda environments use a link-local address
-(`169.254.100.1:2000`). The recommended setup:
+(`169.254.100.1:2000`). The recommended setup lets `XRay.configure()` read and
+parse it — including the `[v6]:port`, bare IPv6, and `tcp:… udp:…` forms; a
+malformed value falls back to `127.0.0.1:2000`:
 
 ```dart
-(String host, int port) _daemonAddress() {
-  final raw = Platform.environment['AWS_XRAY_DAEMON_ADDRESS'] ?? '127.0.0.1:2000';
-  final colon = raw.lastIndexOf(':');
-  return colon == -1 ? (raw, 2000) : (raw.substring(0, colon), int.parse(raw.substring(colon + 1)));
-}
-
-final tracer = XRayTracer(
-  serviceName: Platform.environment['AWS_LAMBDA_FUNCTION_NAME'] ?? 'my-function',
-  sender: UdpSender(host: host, port: port),
+final tracer = XRay.configure(
+  // serviceName defaults to AWS_LAMBDA_FUNCTION_NAME
   sampling: FixedRateSampler(1.0),  // Lambda decides sampling; always forward to daemon
 );
 ```
@@ -575,8 +591,10 @@ XRayTracer(serviceName: 'svc',
 ```
 
 `UdpSender` never throws into your traced code — a resolution, bind, or send
-failure is contained. To observe **local** send failures, pass an `onError`
-callback (silent by default):
+failure is contained. When the tracer builds its own `UdpSender` (no `sender`
+argument), local send failures are reported to the tracer's `onSendError`
+callback, at most once per segment. For a `UdpSender` you construct yourself,
+pass an `onError` callback (silent by default):
 
 ```dart
 XRayTracer(
@@ -637,8 +655,9 @@ Key fields:
 }
 ```
 
-Oversized segments (> 64 KB) are automatically split into a skeleton segment
-plus one independent subsegment document per subsegment.
+Oversized segments (> 65507 bytes, the maximum IPv4 UDP payload) are
+automatically split into a skeleton segment plus one independent subsegment
+document per subsegment.
 
 ---
 

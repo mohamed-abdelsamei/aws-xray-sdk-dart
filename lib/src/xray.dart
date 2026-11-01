@@ -8,6 +8,7 @@ import 'http/xray_http_overrides.dart';
 import 'lambda/lambda_trace_capture.dart';
 import 'models/segment.dart';
 import 'sampling/sampling_strategy.dart';
+import 'sender/daemon_address.dart';
 import 'tracer.dart';
 import 'wrappers/client_registry.dart';
 import 'wrappers/resource_extractor.dart';
@@ -126,8 +127,9 @@ abstract final class XRay {
   /// repeatedly in tests (use [reset] to force re-configuration).
   ///
   /// When [fromEnv] is true (the default) the standard AWS environment is read:
-  ///  * `AWS_XRAY_DAEMON_ADDRESS` → daemon `host:port` (IPv6-literal safe),
-  ///    falling back to `127.0.0.1:2000`;
+  ///  * `AWS_XRAY_DAEMON_ADDRESS` → daemon address (`host:port`, `[v6]:port`,
+  ///    bare IPv6, or `tcp:… udp:…`, using the `udp:` part); malformed values
+  ///    fall back to `127.0.0.1:2000`;
   ///  * `AWS_LAMBDA_FUNCTION_NAME` → default service name.
   ///
   /// Explicit [serviceName], [sampling], or a fully built [tracer] override the
@@ -143,7 +145,7 @@ abstract final class XRay {
     if (existing != null) return existing;
 
     final env = fromEnv ? Platform.environment : const <String, String>{};
-    final (host, port) = _parseDaemonAddress(env['AWS_XRAY_DAEMON_ADDRESS']);
+    final (host, port) = parseDaemonAddress(env['AWS_XRAY_DAEMON_ADDRESS']);
     final name =
         serviceName ?? env['AWS_LAMBDA_FUNCTION_NAME'] ?? 'dart-service';
 
@@ -169,22 +171,6 @@ abstract final class XRay {
 
   static XRayTracer? _resolveInstalled() =>
       isDefaultTracerConfigured ? defaultTracer : null;
-
-  /// Splits an `AWS_XRAY_DAEMON_ADDRESS` value into `(host, port)`, defaulting
-  /// to `127.0.0.1:2000`. Uses [String.lastIndexOf] for the port separator so
-  /// IPv6 literals (which contain `:`) are handled correctly.
-  static (String, int) _parseDaemonAddress(String? value) {
-    const defaultHost = '127.0.0.1';
-    const defaultPort = 2000;
-    if (value == null || value.isEmpty) return (defaultHost, defaultPort);
-
-    final sep = value.lastIndexOf(':');
-    if (sep <= 0 || sep == value.length - 1) return (value, defaultPort);
-
-    final host = value.substring(0, sep);
-    final port = int.tryParse(value.substring(sep + 1));
-    return (host, port ?? defaultPort);
-  }
 
   /// Wraps [client] with X-Ray tracing and returns an instrumented copy.
   ///
@@ -217,6 +203,7 @@ abstract final class XRay {
       extractor: descriptor.extractor,
       requestAdapter: descriptor.requestAdapter,
       responseAdapter: descriptor.responseAdapter,
+      errorStatus: descriptor.errorStatus,
     );
 
     return descriptor.rebuild(client, interceptor.wrap);
@@ -236,6 +223,11 @@ abstract final class XRay {
   /// extract the client's underlying send function, pass it through [wrapSend],
   /// and return a new client using the intercepted send.
   ///
+  /// [errorStatus] is optional. Smithy clients throw on 4xx as well as 5xx;
+  /// return the HTTP status carried by the thrown error so a 4xx is recorded
+  /// as an error (429 as a throttle) rather than a fault. Return null when
+  /// unknown; a null, sub-400 status, or throwing hook falls back to fault.
+  ///
   /// Call once at application startup, before any [fromClient] call:
   /// ```dart
   /// XRay.registerClient<DynamoDbClient>(
@@ -253,6 +245,7 @@ abstract final class XRay {
     required SmithyRequestAdapter<Object> Function(Object) requestAdapter,
     required SmithyResponseAdapter<Object> Function(Object) responseAdapter,
     required T Function(T original, XRayWrapFn wrapSend) rebuild,
+    int? Function(Object error)? errorStatus,
   }) {
     final resolvedNamespace = _traceNamespace(namespace ?? 'aws');
     final resolvedExtractor =
@@ -264,6 +257,7 @@ abstract final class XRay {
       requestAdapter: requestAdapter,
       responseAdapter: responseAdapter,
       rebuild: rebuild,
+      errorStatus: errorStatus,
     );
   }
 
@@ -271,8 +265,15 @@ abstract final class XRay {
   /// is wrapped with [XRayHttpClient].
   ///
   /// Chains any existing [HttpOverrides.global] so other patches are preserved.
+  /// Idempotent while the X-Ray layer is the current override: calling it
+  /// again replaces that layer instead of nesting a second one, so each
+  /// request is traced once, [tracer] takes effect, and a single
+  /// [unpatchHttp] restores the pre-patch overrides. If other overrides were
+  /// installed on top of the X-Ray layer since, a new layer is added on top.
   static void patchHttp(XRayTracer tracer) {
-    HttpOverrides.global = XRayHttpOverrides(tracer, HttpOverrides.current);
+    final current = HttpOverrides.current;
+    final previous = current is XRayHttpOverrides ? current.previous : current;
+    HttpOverrides.global = XRayHttpOverrides(tracer, previous);
   }
 
   /// Removes the X-Ray `dart:io` HTTP patch, restoring the previous overrides.

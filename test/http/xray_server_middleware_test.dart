@@ -29,6 +29,7 @@ void main() {
       required double rate,
       String? requestTraceHeader,
       Future<void> Function()? handler,
+      String path = '/orders',
     }) async {
       sender = _RecordingSender();
       final tracer = XRayTracer(
@@ -48,7 +49,7 @@ void main() {
 
       final client = HttpClient();
       final req = await client
-          .getUrl(Uri.parse('http://127.0.0.1:${server.port}/orders'));
+          .getUrl(Uri.parse('http://127.0.0.1:${server.port}$path'));
       if (requestTraceHeader != null) {
         req.headers.set('x-amzn-trace-id', requestTraceHeader);
       }
@@ -88,6 +89,43 @@ void main() {
       expect(seg['parent_id'], '1111aaaa2222bbbb');
     });
 
+    test('invalid Root drops Parent and starts a fresh trace', () async {
+      await serveAndCapture(
+        rate: 1.0,
+        requestTraceHeader: 'Root=bad;Parent=53995c3f42cd8ad8',
+      );
+
+      final seg = sender.last;
+      expect(seg['trace_id'], matches(r'^1-[0-9a-f]{8}-[0-9a-f]{24}$'));
+      expect(seg.containsKey('parent_id'), isFalse);
+    });
+
+    test('malformed Parent is omitted under a valid Root', () async {
+      final upstreamTrace = TraceId.generate();
+      await serveAndCapture(
+        rate: 1.0,
+        requestTraceHeader: 'Root=$upstreamTrace;Parent=xyz;Sampled=1',
+      );
+
+      final seg = sender.last;
+      expect(seg['trace_id'], upstreamTrace.toString());
+      expect(seg.containsKey('parent_id'), isFalse);
+    });
+
+    test('non-hex Root does not throw AssertionError', () async {
+      // The response trace header is built with asserts on; a non-hex Root
+      // that slipped through tryParse used to fail here.
+      final header = await serveAndCapture(
+        rate: 1.0,
+        requestTraceHeader:
+            'Root=1-zzzzzzzz-bd862e3fe1be46a994272793;Parent=zzzzzzzzzzzzzzzz',
+      );
+
+      expect(header, isNotNull);
+      expect(header, isNot(contains('zzzzzzzz')));
+      expect(sender.last.containsKey('parent_id'), isFalse);
+    });
+
     test('response header reuses the same root trace id', () async {
       final upstreamTrace = TraceId.generate();
       final header = await serveAndCapture(
@@ -95,6 +133,17 @@ void main() {
         requestTraceHeader: 'Root=$upstreamTrace;Sampled=1',
       );
       expect(header, contains('Root=$upstreamTrace'));
+    });
+
+    test('recorded url has no query string', () async {
+      await serveAndCapture(
+        rate: 1.0,
+        path: '/orders?X-Amz-Signature=abc',
+      );
+
+      final http = sender.last['http'] as Map<String, Object?>;
+      final request = http['request'] as Map<String, Object?>;
+      expect(request['url'], 'http://127.0.0.1:${server.port}/orders');
     });
 
     test('records request and response http data on the segment', () async {
@@ -178,6 +227,75 @@ void main() {
 
       expect(captured, isNotNull);
       expect(captured!.traceId.toString(), upstreamTrace.toString());
+    });
+  });
+
+  group('handleTraced response status flags', () {
+    late HttpServer server;
+    late InMemorySender sender;
+
+    tearDown(() async {
+      await server.close(force: true);
+    });
+
+    // Serves one request whose handler runs [handler], and returns the
+    // segment the tracer sent for it.
+    Future<Segment> serve(Future<void> Function(HttpResponse) handler) async {
+      sender = InMemorySender();
+      final tracer = XRayTracer(
+        serviceName: 'edge-svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+      );
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((req) async {
+        try {
+          await handleTraced(req, tracer, () => handler(req.response));
+        } catch (_) {
+          req.response.statusCode = 500;
+        }
+        await req.response.close();
+      });
+
+      final client = HttpClient();
+      final req = await client
+          .getUrl(Uri.parse('http://127.0.0.1:${server.port}/orders'));
+      final res = await req.close();
+      await res.drain<void>();
+      client.close();
+      return sender.segments.single;
+    }
+
+    Future<Segment> serveStatus(int status) =>
+        serve((response) async => response.statusCode = status);
+
+    test('200 sets no flags', () async {
+      final seg = await serveStatus(200);
+      expect(seg.http?.response?.status, 200);
+      expect((seg.error, seg.throttle, seg.fault), (false, false, false));
+    });
+
+    test('404 sets error only', () async {
+      final seg = await serveStatus(404);
+      expect((seg.error, seg.throttle, seg.fault), (true, false, false));
+    });
+
+    test('429 sets throttle and error', () async {
+      final seg = await serveStatus(429);
+      expect((seg.error, seg.throttle, seg.fault), (true, true, false));
+    });
+
+    test('500 sets fault only', () async {
+      final seg = await serveStatus(500);
+      expect((seg.error, seg.throttle, seg.fault), (false, false, true));
+    });
+
+    test('a throwing handler records a fault with its cause and no status',
+        () async {
+      final seg = await serve((_) async => throw StateError('boom'));
+      expect(seg.http?.response, isNull);
+      expect((seg.error, seg.throttle, seg.fault), (false, false, true));
+      expect(seg.cause?.exceptions.single.message, contains('boom'));
     });
   });
 }

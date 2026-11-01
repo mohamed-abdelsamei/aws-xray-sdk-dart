@@ -11,6 +11,7 @@ import '../models/http_data.dart';
 import '../models/trace_header.dart';
 import '../context/trace_suppression.dart';
 import '../tracer.dart';
+import '../utils.dart';
 
 /// Wraps [http.Client] to trace every outbound HTTP request through
 /// `package:http`.
@@ -47,7 +48,7 @@ import '../tracer.dart';
 /// ```yaml
 /// dependencies:
 ///   http: ^1.0.0
-///   aws_xray_sdk: ^0.1.0
+///   aws_xray_sdk: ^0.4.0
 /// ```
 ///
 /// Usage:
@@ -86,15 +87,37 @@ final class XRayBaseClient extends http.BaseClient {
       sampled: tracer.isSampled,
     );
 
+    // Only the inner send sits in the rethrowing try: post-response
+    // enrichment is guarded separately, so tracing never turns a successful
+    // response into an exception.
+    final http.StreamedResponse response;
     try {
       // Suppress the global dart:io patch for this send so the same request is
       // not traced twice (once here, once as a bare host-named subsegment by
       // an XRayHttpClient sitting under package:http's IOClient).
-      final response =
-          await runWithoutDartIoTracing(() => _inner.send(request));
-      // Build the aws block from request + response so it carries the
-      // request_id (response header), region, and resource_names.
-      final awsData = isAws ? _awsDataFor(request, response: response) : null;
+      response = await runWithoutDartIoTracing(() => _inner.send(request));
+    } catch (e) {
+      try {
+        // Transport failure (no response): record request-only aws data.
+        final awsData = isAws ? _awsDataFor(request) : null;
+        var failed = sub.withHttp(HttpData(
+          request: HttpRequestData(
+            method: request.method,
+            url: request.url.toString(),
+            traced: true,
+          ),
+        ));
+        if (awsData != null) failed = failed.withAws(awsData);
+        tracer.failSubsegment(failed, e);
+      } catch (_) {
+        _quietly(() => tracer.endSubsegment(sub.withFault()));
+      }
+      rethrow;
+    }
+
+    // Status first, aws data second, each guarded on its own: a request whose
+    // aws data cannot be built still records its http block and fault.
+    try {
       sub = sub.withHttpCall(
         method: request.method,
         url: request.url.toString(),
@@ -102,78 +125,93 @@ final class XRayBaseClient extends http.BaseClient {
         contentLength: response.contentLength,
         traced: true,
       );
-      if (awsData != null) sub = sub.withAws(awsData);
+    } catch (_) {/* keep the bare subsegment */}
+    if (isAws) {
+      try {
+        // Build the aws block from request + response so it carries the
+        // request_id (response header), region, and resource_names.
+        final awsData = _awsDataFor(request, response: response);
+        if (awsData != null) sub = sub.withAws(awsData);
+      } catch (_) {/* keep the http-only subsegment */}
+    }
 
-      // On an AWS error response, buffer the body so we can extract the AWS
-      // exception type/message into the subsegment cause. The body is then
-      // re-emitted to the caller unchanged.
-      final isError = response.statusCode < 200 || response.statusCode >= 300;
-      if (isAws && isError) {
-        final bytes = await response.stream.toBytes();
+    // On an AWS error response, buffer the body so we can extract the AWS
+    // exception type/message into the subsegment cause. The body is then
+    // re-emitted to the caller unchanged.
+    final isError = response.statusCode < 200 || response.statusCode >= 300;
+    if (isAws && isError) {
+      final List<int> bytes;
+      try {
+        bytes = await response.stream.toBytes();
+      } catch (e) {
+        // The body stream's own error: the caller would see it reading the
+        // body, so surface it unchanged.
+        _quietly(() => tracer.failSubsegment(sub, e));
+        rethrow;
+      }
+      try {
         final error = _awsError(response, bytes);
         if (error != null) {
-          sub = sub.withCause(error.cause);
-          if (isThrottleErrorCode(error.type)) sub = sub.withThrottle();
+          var withCause = sub.withCause(error.cause);
+          if (isThrottleErrorCode(error.type)) {
+            withCause = withCause.withThrottle();
+          }
+          sub = withCause;
         }
-        tracer.endSubsegment(sub);
-        return http.StreamedResponse(
-          Stream.value(bytes),
-          response.statusCode,
-          contentLength: response.contentLength,
-          headers: response.headers,
-          reasonPhrase: response.reasonPhrase,
-          request: response.request,
-        );
-      }
-
-      // Register the enriched sub so that if the caller never drains the body
-      // (HEAD, 204/304, status-only early return), the finalize-time sweep
-      // emits this document — with status/aws data — instead of a bare span.
-      tracer.updatePending(sub);
-
-      var closed = false;
-      final tracedSub = sub;
-      final tracedStream = response.stream
-          .transform(StreamTransformer<List<int>, List<int>>.fromHandlers(
-        handleData: (data, sink) => sink.add(data),
-        handleError: (e, st, sink) {
-          if (!closed) {
-            closed = true;
-            tracer.failSubsegment(tracedSub, e);
-          }
-          sink.addError(e, st);
-        },
-        handleDone: (sink) {
-          if (!closed) {
-            closed = true;
-            tracer.endSubsegment(tracedSub);
-          }
-          sink.close();
-        },
-      ));
-
+      } catch (_) {/* close without the AWS cause */}
+      final errorSub = sub;
+      _quietly(() => tracer.endSubsegment(errorSub));
       return http.StreamedResponse(
-        tracedStream,
+        Stream.value(bytes),
         response.statusCode,
         contentLength: response.contentLength,
         headers: response.headers,
         reasonPhrase: response.reasonPhrase,
         request: response.request,
       );
-    } catch (e) {
-      // Transport failure (no response): record request-only aws data.
-      final awsData = isAws ? _awsDataFor(request) : null;
-      var failed = sub.withHttp(HttpData(
-        request: HttpRequestData(
-          method: request.method,
-          url: request.url.toString(),
-          traced: true,
-        ),
-      ));
-      if (awsData != null) failed = failed.withAws(awsData);
-      tracer.failSubsegment(failed, e);
-      rethrow;
     }
+
+    // Register the enriched sub so that if the caller never drains the body
+    // (HEAD, 204/304, status-only early return), the finalize-time sweep
+    // emits this document — with status/aws data — instead of a bare span.
+    final tracedSub = sub;
+    _quietly(() => tracer.updatePending(tracedSub));
+
+    var closed = false;
+    final tracedStream = response.stream
+        .transform(StreamTransformer<List<int>, List<int>>.fromHandlers(
+      handleData: (data, sink) => sink.add(data),
+      handleError: (e, st, sink) {
+        if (!closed) {
+          closed = true;
+          _quietly(() => tracer.failSubsegment(tracedSub, e));
+        }
+        sink.addError(e, st);
+      },
+      handleDone: (sink) {
+        if (!closed) {
+          closed = true;
+          _quietly(() => tracer.endSubsegment(tracedSub));
+        }
+        sink.close();
+      },
+    ));
+
+    return http.StreamedResponse(
+      tracedStream,
+      response.statusCode,
+      contentLength: response.contentLength,
+      headers: response.headers,
+      reasonPhrase: response.reasonPhrase,
+      request: response.request,
+    );
+  }
+
+  /// Runs a tracer call whose failure must never reach the caller.
+  static void _quietly(void Function() f) {
+    try {
+      f();
+    } catch (_) {}
   }
 
   /// Maps an AWS host to X-Ray's canonical service name so the console renders
@@ -221,11 +259,13 @@ final class XRayBaseClient extends http.BaseClient {
     if (operation == null) return null;
 
     final body = _bodyParams(request);
-    final tableName = body['TableName'] as String?;
-    final bucketName = body['Bucket'] as String?;
-    final queueUrl = body['QueueUrl'] as String?;
-    final topicArn = body['TopicArn'] as String?;
-    final keyId = body['KeyId'] as String?;
+    // `is String` checks: a field of the wrong JSON type is skipped, never a
+    // TypeError.
+    final tableName = _string(body['TableName']);
+    final bucketName = _string(body['Bucket']);
+    final queueUrl = _string(body['QueueUrl']);
+    final topicArn = _string(body['TopicArn']);
+    final keyId = _string(body['KeyId']);
     // Lambda Invoke carries the target function in the URL path, not the body.
     final functionName = _lambdaFunctionName(request.url);
 
@@ -250,6 +290,8 @@ final class XRayBaseClient extends http.BaseClient {
     );
   }
 
+  static String? _string(Object? value) => value is String ? value : null;
+
   /// The AWS request id from the response headers, if present.
   static String? _requestId(http.BaseResponse response) =>
       response.headers['x-amzn-requestid'] ??
@@ -269,8 +311,9 @@ final class XRayBaseClient extends http.BaseClient {
     if (target != null && target.isNotEmpty) {
       return target.contains('.') ? target.split('.').last : target;
     }
-    if (request is http.Request) {
-      final action = Uri.splitQueryString(request.body)['Action'];
+    final body = _bodyText(request);
+    if (body != null) {
+      final action = Uri.splitQueryString(body)['Action'];
       if (action != null && action.isNotEmpty) return action;
     }
     return _restOperation(request.url);
@@ -303,13 +346,25 @@ final class XRayBaseClient extends http.BaseClient {
     return null;
   }
 
+  /// The request body as text, or null when it is not an [http.Request] or its
+  /// bytes do not decode in the request's encoding (e.g. a binary S3 PUT).
+  static String? _bodyText(http.BaseRequest request) {
+    if (request is! http.Request) return null;
+    try {
+      return request.body;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Parses request-body parameters for resource extraction.
   ///
   /// JSON bodies are decoded as a map; query (`x-www-form-urlencoded`) bodies
   /// are split into key/value pairs (e.g. SNS `TopicArn=...`).
   static Map<String, Object?> _bodyParams(http.BaseRequest request) {
-    if (request is! http.Request || request.body.isEmpty) return const {};
-    final body = request.body.trimLeft();
+    final text = _bodyText(request);
+    if (text == null || text.isEmpty) return const {};
+    final body = text.trimLeft();
     if (body.startsWith('{')) {
       try {
         final decoded = jsonDecode(body);
@@ -318,7 +373,7 @@ final class XRayBaseClient extends http.BaseClient {
       return const {};
     }
     try {
-      return Uri.splitQueryString(request.body);
+      return Uri.splitQueryString(text);
     } catch (_) {
       return const {};
     }
@@ -354,9 +409,9 @@ final class XRayBaseClient extends http.BaseClient {
       type: type,
       cause: Cause(exceptions: [
         XRayException(
-          id: _exceptionId(),
+          id: randomHex(16),
           type: type,
-          message: message,
+          message: truncateMessage(redactUrlsInText(message)),
           remote: true,
         ),
       ]),
@@ -419,6 +474,4 @@ final class XRayBaseClient extends http.BaseClient {
       return m.group(0)!; // unknown or out-of-range entity: leave as-is
     });
   }
-
-  static String _exceptionId() => XRayException.from(Object()).id;
 }

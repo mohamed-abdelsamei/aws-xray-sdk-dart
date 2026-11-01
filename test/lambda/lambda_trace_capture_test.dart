@@ -72,6 +72,50 @@ void main() {
       expect(ctx.sampled, isTrue);
     });
 
+    test('invalid Root yields a fresh trace and null parentId', () async {
+      final capture = LambdaTraceCapture(
+        innerFactory: () =>
+            _FakeRuntimeClient('Root=bad;Parent=53995c3f42cd8ad8;Sampled=1'),
+      );
+      await capture.run(() async {
+        await http.get(Uri.parse('http://localhost/invocation/next'));
+      });
+
+      final ctx = capture.context();
+      expect(ctx.parentId, isNull);
+      expect(ctx.traceId.toString(), matches(r'^1-[0-9a-f]{8}-[0-9a-f]{24}$'));
+    });
+
+    test('malformed Parent under a valid Root yields null parentId', () async {
+      final capture = LambdaTraceCapture(
+        innerFactory: () =>
+            _FakeRuntimeClient('Root=$traceId;Parent=xyz;Sampled=1'),
+      );
+      await capture.run(() async {
+        await http.get(Uri.parse('http://localhost/invocation/next'));
+      });
+
+      final ctx = capture.context();
+      expect(ctx.traceId.toString(), traceId.toString());
+      expect(ctx.parentId, isNull);
+    });
+
+    test('malformed Parent with Sampled=0 keeps trace id and sampling',
+        () async {
+      final capture = LambdaTraceCapture(
+        innerFactory: () =>
+            _FakeRuntimeClient('Root=$traceId;Parent=xyz;Sampled=0'),
+      );
+      await capture.run(() async {
+        await http.get(Uri.parse('http://localhost/invocation/next'));
+      });
+
+      final ctx = capture.context();
+      expect(ctx.traceId.toString(), traceId.toString());
+      expect(ctx.parentId, isNull);
+      expect(ctx.sampled, isFalse);
+    });
+
     test('a response without the header leaves rawHeader empty', () async {
       final fake = _FakeRuntimeClient(null);
       final capture = LambdaTraceCapture(innerFactory: () => fake);

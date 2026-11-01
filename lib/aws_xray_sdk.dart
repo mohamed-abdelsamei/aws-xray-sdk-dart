@@ -23,14 +23,14 @@
 library;
 
 // Core
-export 'src/tracer.dart';
+export 'src/tracer.dart' hide newTracerWithUdpSeamsForTesting;
 export 'src/xray.dart';
 
 // Models
 export 'src/models/trace_id.dart';
 export 'src/models/segment.dart';
 export 'src/models/subsegment.dart';
-export 'src/models/http_data.dart';
+export 'src/models/http_data.dart' hide redactUrl, redactUrlsInText;
 export 'src/models/aws_data.dart';
 export 'src/models/cause.dart';
 

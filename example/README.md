@@ -11,8 +11,9 @@ dart pub get
 dart run example/basic_usage.dart
 ```
 
-Every example runs to completion without a daemon and prints to stdout. They
-differ only in sender:
+Every example except `server_middleware` (a server that runs until you stop it)
+runs to completion without a daemon and prints to stdout. They differ only in
+sender:
 
 - **`NoopSender`** (`advanced_tracing`, `error_handling`, `manual_instrumentation`,
   `sampling_strategies`, `zero_config`, `lambda_runtime`) — discards segments.

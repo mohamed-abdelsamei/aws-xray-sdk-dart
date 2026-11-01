@@ -21,6 +21,16 @@ class _PacketSender extends Sender {
 
   bool get isEmpty => packets.isEmpty;
 
+  // Every packet decoded, in send order.
+  List<Map<String, Object?>> get docs => [
+        for (final p in packets)
+          () {
+            final raw = utf8.decode(p);
+            return jsonDecode(raw.substring(raw.indexOf('\n') + 1))
+                as Map<String, Object?>;
+          }(),
+      ];
+
   // Decode the last packet: strip the header line and parse the JSON body.
   Map<String, Object?> get lastDoc {
     final raw = utf8.decode(packets.last);
@@ -36,6 +46,14 @@ class _ThrowingPacketSender extends Sender {
   @override
   Future<void> sendPackets(List<List<int>> ps) async =>
       throw StateError('daemon down');
+  @override
+  Future<void> close() async {}
+}
+
+// A custom sender that implements only send/close.
+class _SendOnlySender extends Sender {
+  @override
+  Future<void> send(Segment segment) async {}
   @override
   Future<void> close() async {}
 }
@@ -267,6 +285,113 @@ void main() {
       await tracer.runLambda(traceId, parentId, 'handler', () async {});
       expect(sender.lastDoc.containsKey('namespace'), isFalse);
     });
+
+    test('oversized handler doc is split into linked docs within 65507 bytes',
+        () async {
+      final big = 'x' * (20 * 1024);
+      await tracer.runLambda(traceId, parentId, 'handler', () async {
+        for (var i = 0; i < 5; i++) {
+          await tracer.captureAsync('child-$i', (span) async {
+            tracer.addMetadata('blob', big);
+          });
+        }
+      });
+
+      expect(sender.packets.length, greaterThan(1));
+      final docs = sender.packets.map((p) {
+        expect(p.length, lessThanOrEqualTo(65507));
+        final raw = utf8.decode(p);
+        return jsonDecode(raw.substring(raw.indexOf('\n') + 1))
+            as Map<String, Object?>;
+      }).toList();
+
+      final root = docs.first;
+      expect(root['name'], 'handler');
+      expect(root['parent_id'], parentId);
+      expect(root.containsKey('namespace'), isFalse);
+      expect(root.containsKey('subsegments'), isFalse);
+      for (final d in docs) {
+        expect(d['type'], 'subsegment');
+        expect(d['trace_id'], traceId.toString());
+      }
+      final children = docs.skip(1).toList();
+      expect(children.map((d) => d['name']),
+          ['child-0', 'child-1', 'child-2', 'child-3', 'child-4']);
+      for (final c in children) {
+        expect(c['parent_id'], root['id']);
+      }
+    });
+
+    test('oversized child is split recursively; children keep namespace',
+        () async {
+      final big = 'x' * (25 * 1024);
+      await tracer.runLambda(traceId, parentId, 'handler', () async {
+        await tracer.captureAsync('outer', (_) async {
+          for (var i = 0; i < 3; i++) {
+            await tracer.captureAsync('g$i', (_) async {
+              tracer.addMetadata('blob', big);
+            }, namespace: 'aws');
+          }
+        }, namespace: 'remote');
+        await tracer.captureAsync('small', (_) async {}, namespace: 'aws');
+      });
+
+      for (final p in sender.packets) {
+        expect(p.length, lessThanOrEqualTo(65507));
+      }
+      final docs = sender.docs;
+      expect(docs.map((d) => d['name']),
+          ['handler', 'outer', 'g0', 'g1', 'g2', 'small']);
+
+      final root = docs[0];
+      final outer = docs[1];
+      expect(root.containsKey('namespace'), isFalse);
+      expect(root['parent_id'], parentId);
+      expect(outer['parent_id'], root['id']);
+      expect(outer['namespace'], 'remote');
+      expect(outer.containsKey('subsegments'), isFalse);
+      for (final g in docs.sublist(2, 5)) {
+        expect(g['parent_id'], outer['id']);
+        expect(g['namespace'], 'aws');
+      }
+      expect(docs[5]['parent_id'], root['id']);
+      expect(docs[5]['namespace'], 'aws');
+      for (final d in docs) {
+        expect(d['trace_id'], traceId.toString());
+        expect(d['type'], 'subsegment');
+      }
+      expect(docs.map((d) => d['id']).toSet(), hasLength(docs.length));
+    });
+
+    test('swept and faulted children keep their flags in split docs', () async {
+      final big = 'x' * (40 * 1024);
+      await tracer.runLambda(traceId, parentId, 'handler', () async {
+        final open =
+            tracer.beginSubsegment('never-closed', namespace: 'remote');
+        tracer.updatePending(open.addMetadata('blob', big));
+        try {
+          await tracer.captureAsync('boom', (_) async {
+            tracer.addMetadata('blob', big);
+            throw StateError('boom');
+          });
+        } on StateError catch (_) {}
+      });
+
+      final docs = sender.docs;
+      expect(docs, hasLength(3));
+      final rootId = docs[0]['id'];
+      final byName = {for (final d in docs) d['name']: d};
+
+      final swept = byName['never-closed']!;
+      expect((swept['metadata'] as Map)['xray'], {'incomplete': true});
+      expect(swept['namespace'], 'remote');
+      expect(swept.containsKey('in_progress'), isFalse);
+      expect(swept['parent_id'], rootId);
+
+      final boom = byName['boom']!;
+      expect(boom['fault'], isTrue);
+      expect(boom['parent_id'], rootId);
+    });
   });
 
   group('XRayTracer.runLambda — fault & annotations', () {
@@ -347,6 +472,59 @@ void main() {
       );
       expect(sender.packets, hasLength(1));
       expect(sender.lastDoc['fault'], isTrue);
+    });
+  });
+
+  group('XRayTracer.runLambda — custom senders', () {
+    test('a send-only custom Sender reports UnsupportedError via onSendError',
+        () async {
+      final errors = <Object>[];
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: _SendOnlySender(),
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) => errors.add(e),
+      );
+
+      final result =
+          await t.runLambda(traceId, parentId, 'handler', () async => 7);
+
+      expect(result, 7);
+      expect(errors, hasLength(1));
+      expect(
+        errors.single,
+        isA<UnsupportedError>()
+            .having((e) => e.message, 'message', contains('_SendOnlySender'))
+            .having((e) => e.message, 'message', contains('runLambda')),
+      );
+    });
+
+    test('InMemorySender still captures the lambda packet', () async {
+      final mem = InMemorySender();
+      final errors = <Object>[];
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: mem,
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) => errors.add(e),
+      );
+      await t.runLambda(traceId, parentId, 'handler', () async {});
+      expect(mem.packets, hasLength(1));
+      expect(errors, isEmpty);
+    });
+
+    test('NoopSender stays a silent no-op', () async {
+      final errors = <Object>[];
+      final t = XRayTracer(
+        serviceName: 'lambda-svc',
+        sender: NoopSender(),
+        sampling: FixedRateSampler(1.0),
+        onSendError: (s, e) => errors.add(e),
+      );
+      expect(await t.runLambda(traceId, parentId, 'handler', () async => 1), 1);
+      expect(errors, isEmpty);
+      await expectLater(
+          NoopSender().sendPackets([utf8.encode('x')]), completes);
     });
   });
 }

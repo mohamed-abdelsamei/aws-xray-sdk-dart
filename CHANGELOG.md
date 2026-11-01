@@ -1,5 +1,127 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- **`errorStatus` hook for Smithy clients.** `XRay.registerClient` accepts an
+  optional `errorStatus: int? Function(Object error)`. When it returns a status of 400
+  or above for a thrown error, the subsegment is classified like a response
+  (4xx error, 429 throttle, 5xx fault) and records `http.response.status`
+  instead of always being a fault. Without the hook, behaviour is unchanged.
+
+### Changed
+
+The entries below change observable behaviour; review them before upgrading.
+
+- **Behaviour change — recorded URLs no longer include query strings,
+  userinfo, or fragments.** `http.request.url` is now
+  `scheme://host[:port]/path` on every instrumentation path (`XRayHttpClient`,
+  `XRayBaseClient`, `XRay.fromClient`, `handleTraced`, and user-built
+  `HttpRequestData`), so presigned-URL signatures, OAuth codes, and `user:pw@`
+  credentials stay out of X-Ray. There is no setting to keep the query string.
+  The in-memory `HttpRequestData.url` keeps the raw value; only the emitted
+  document is redacted. If a `?` or `#` comes before an `@`, that `@` may be
+  part of a query: only a valid `host[:port]` before the `?` or `#` is kept.
+- **Behaviour change — URLs inside exception messages are redacted too.**
+  `cause.exceptions[].message` drops userinfo, query strings, and fragments
+  from every URL it contains, so errors such as
+  `ClientException: …, uri=https://…?X-Amz-Signature=…` no longer leak what
+  `http.request.url` hides. This applies to caught errors, AWS error-body
+  messages, and user-built `XRayException`s (in the emitted JSON; the
+  in-memory `message` keeps its raw value). Redaction runs before the
+  1024-character cap (see "Exception messages are capped" below). Anything
+  from a `:` followed by `/` or `\` up to the next ASCII space or control
+  character is treated as a URL. Not caught: URLs without a scheme, bare
+  query strings, encoded URLs (`https:%2F%2Fu:p@h/p`, HTML or `\u` escapes),
+  userinfo containing whitespace or control characters, userinfo containing a
+  raw `/`, `?` or `#` when what precedes it looks like a host or host:port
+  (`https://admin:2024/s3cret@h/p` reads as host, port and path), and
+  secrets in the URL path.
+- **Behaviour change — `Sender.sendPackets` now throws `UnsupportedError` by
+  default.** It was a
+  silent no-op, so a custom `Sender` that only overrode `send` lost every
+  `runLambda` trace without notice. The error names the sender class; the
+  tracer reports it through `onSendError` (when set) and never throws into
+  the app. Direct callers of `sendPackets` on such a sender now receive the
+  error. Custom senders used with `runLambda` must override `sendPackets`.
+  `UdpSender`, `InMemorySender`, and `NoopSender` are unchanged.
+
+### Fixed
+
+- **`XRay.patchHttp` is idempotent.** Calling it twice nested two X-Ray
+  layers, so every `dart:io` request was traced twice and one `unpatchHttp()`
+  removed only one layer. A repeat call now replaces the X-Ray layer (using
+  the new tracer) instead of wrapping it, and a single `unpatchHttp()`
+  restores the overrides that were in place before the first patch.
+- **Exception messages are capped and never throw.** `XRayException.from`
+  truncates messages over 1024 UTF-16 code units and appends `…[truncated]`
+  (without splitting a surrogate pair). If an error's `toString()` throws, the
+  message falls back to its runtime type name; previously that dropped the
+  whole segment when the error escaped `tracer.run`.
+- **`onSendError` now fires for transport failures.** The `UdpSender` the
+  tracer builds itself (no `sender` argument) swallowed resolve, bind, and
+  datagram-send errors, so `onSendError` only ever saw encode errors. It now
+  reports those local failures too, at most once per segment send, and never
+  throws into the app. `runLambda` also reports a document that fails to
+  encode (such as a cyclic metadata map) instead of dropping it silently. A
+  user-supplied `UdpSender` keeps reporting through its own `onError`.
+- **One refused datagram no longer silences tracing for good.** When the OS
+  refuses a datagram (for example one over the datagram limit, or over 9216
+  bytes on macOS's default UDP limit), Dart's socket returns 0 instead of
+  throwing, and every later send on that socket did the same. `UdpSender`
+  ignored this and kept the socket, so all later traces were lost with no
+  error. A short send is now reported through `onError` (and the tracer's
+  `onSendError`), and the socket is replaced so the next send gets through.
+- **`handleTraced` flags failed requests.** The server segment recorded the
+  response status but no flags, so a 500 looked healthy in X-Ray. A 4xx
+  status now sets `error`, 429 sets `throttle` and `error`, and 5xx sets
+  `fault`, matching client subsegments. The same applies to any segment
+  closed by `run()` that carries an `http.response.status`.
+  New: `Segment.applyStatus(int)`, the segment counterpart of
+  `Subsegment.applyStatus`.
+- **Large Lambda traces are no longer dropped.** `runLambda` sent the
+  whole handler subsegment tree as a single UDP datagram, so a large
+  invocation exceeded the datagram limit and the entire trace was lost.
+  It now uses the same recursive split as standalone segments: the handler
+  document is emitted without its children, and each child becomes its own
+  subsegment document linked by `parent_id`. Small documents are unchanged,
+  byte for byte.
+- **Split threshold lowered to the real UDP limit.** The encoder split
+  documents above 65536 bytes, but an IPv4 UDP datagram carries at most 65507,
+  so documents of 65508 to 65536 bytes were sent as one datagram and failed.
+  The cap is now 65507 bytes for both `encode()` and Lambda documents.
+- **`AWS_XRAY_DAEMON_ADDRESS` parsing is stricter and broader.** `configure`
+  now understands `[v6]:port`, bare IPv6 literals (`::1`), and the dual
+  `tcp:h:p udp:h:p` form in either order (the `udp:` address is used).
+  Malformed values (bad or out-of-range port, empty host, `tcp:`-only) fall
+  back to `127.0.0.1:2000` instead of producing a half-parsed address.
+- **Malformed incoming trace headers no longer leak into traces.**
+  `TraceId.tryParse` (and so `TraceId.parseRootString`) now requires hex in
+  the timestamp and random parts (non-hex ids were accepted and later failed
+  an assert in debug builds).
+  `handleTraced`, `tracer.trace()` and `LambdaTraceCapture.context()` drop
+  `Parent` when the `Root` is invalid (a fresh trace is started) or the parent
+  is not 16 hex characters.
+- **One unencodable metadata value no longer drops the whole segment.** A
+  `DateTime`, custom object, or `NaN`/`Infinity` in metadata made `jsonEncode`
+  throw, so the segment was lost. Such values now fall back to `toJson()`, then
+  `toString()`, then the placeholder `"<unencodable:Type>"`. Documents with only
+  JSON-native values encode byte for byte as before.
+- **A throwing Smithy adapter no longer breaks the AWS call.** In
+  `XRay.fromClient` clients, a `requestAdapter` that throws now sends the call
+  untraced. A `withTraceHeader` that throws sends the original request, still
+  traced. A `responseAdapter` that throws after a successful call returns the
+  response and closes the subsegment without response data. Only the
+  transport's own error reaches the caller, as the same object with its
+  original stack trace.
+- **`XRayBaseClient` no longer faults AWS calls with odd request bodies.** A
+  resource field of the wrong JSON type (for example `"TableName": 123`) threw
+  a `TypeError` that replaced a 200 response, or the transport's own error.
+  Such fields are now left out of the `aws` block. Tracing work after the
+  response arrives is guarded, so a successful response always reaches the
+  caller, and a transport error is rethrown unchanged.
+
 ## 0.4.1
 
 Docs and release-tooling release — no library code changes.

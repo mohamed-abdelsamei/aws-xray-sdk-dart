@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:aws_xray_sdk/aws_xray_sdk.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
 class _RecordingSender extends Sender {
@@ -42,6 +43,20 @@ void main() {
       final res = await client.get(Uri.parse('https://example.com'));
       expect(res.statusCode, 200);
       expect(sender.isEmpty, isTrue);
+    });
+
+    test('recorded url has no userinfo, query, or fragment', () async {
+      final client = XRayBaseClient(_MockClient(200), tracer);
+
+      final segment = tracer.beginSegment();
+      await tracer.run(segment, () async {
+        await client.get(
+          Uri.parse('https://user:pw@h.example/p?X-Amz-Signature=abc#f'),
+        );
+      });
+
+      final sub = sender.lastSubs.first as Map;
+      expect(sub['http']['request']['url'], 'https://h.example/p');
     });
 
     test('creates a subsegment for each request', () async {
@@ -348,6 +363,29 @@ void main() {
       expect((sub['aws'] as Map)['table_name'], 'missing');
     });
 
+    test('aws error message over 1024 chars is truncated with marker',
+        () async {
+      final inner = _MockClient(
+        400,
+        body: jsonEncode({
+          '__type': 'com.amazonaws#ValidationException',
+          'message': 'm' * 5000,
+        }),
+      );
+      final client = XRayBaseClient(inner, tracer);
+
+      await tracer.run(tracer.beginSegment(), () async {
+        await client.post(
+          Uri.parse('https://dynamodb.us-east-1.amazonaws.com/'),
+          headers: {'X-Amz-Target': 'DynamoDB_20120810.GetItem'},
+        );
+      });
+
+      final sub = sender.lastSubs.first as Map;
+      final exc = ((sub['cause'] as Map)['exceptions'] as List).first as Map;
+      expect(exc['message'], '${'m' * 1024}…[truncated]');
+    });
+
     test('aws throttle error code marks non-429 response as throttled',
         () async {
       final inner = _MockClient(
@@ -372,6 +410,50 @@ void main() {
       expect(sub['error'], isTrue);
       final exc = ((sub['cause'] as Map)['exceptions'] as List).first as Map;
       expect(exc['type'], 'ProvisionedThroughputExceededException');
+    });
+
+    group('URLs in AWS error-body messages are redacted', () {
+      Future<String> recordedMessage(int status, String body) async {
+        final client = XRayBaseClient(_MockClient(status, body: body), tracer);
+        final segment = tracer.beginSegment();
+        await tracer.run(segment, () async {
+          await client.post(
+            Uri.parse('https://sns.us-east-1.amazonaws.com/'),
+            body: 'Action=Publish',
+          );
+        });
+        final sub = sender.lastSubs.first as Map;
+        final exc = ((sub['cause'] as Map)['exceptions'] as List).first as Map;
+        expect(exc['remote'], isTrue);
+        return exc['message'] as String;
+      }
+
+      test('JSON body', () async {
+        final message = await recordedMessage(
+          400,
+          '{"__type":"X","message":"see https://h.example/p?token=abc"}',
+        );
+        expect(message, 'see https://h.example/p');
+      });
+
+      test('XML body', () async {
+        final message = await recordedMessage(
+          403,
+          '<ErrorResponse><Error><Code>X</Code>'
+          '<Message>see https://u:p@h.example/p</Message>'
+          '</Error></ErrorResponse>',
+        );
+        expect(message, 'see https://h.example/p');
+      });
+
+      test('redaction runs before the 1024-character cap', () async {
+        final text = '${'a' * 1005} https://user:secretpw@h/p';
+        final message = await recordedMessage(
+          400,
+          jsonEncode({'__type': 'X', 'message': text}),
+        );
+        expect(message, '${'a' * 1005} https://h/p');
+      });
     });
 
     test('records aws error cause from XML error body', () async {
@@ -588,6 +670,103 @@ void main() {
       expect(sub['fault'], isTrue);
       expect(sub['http']['request']['url'], 'https://api.example.com/data');
     });
+  });
+
+  group('XRayBaseClient containment', () {
+    late InMemorySender sender;
+    late XRayTracer tracer;
+
+    setUp(() {
+      sender = InMemorySender();
+      tracer = XRayTracer(
+        serviceName: 'test-svc',
+        sender: sender,
+        sampling: FixedRateSampler(1.0),
+      );
+    });
+
+    // Resource fields of the wrong JSON type.
+    http.Request badBodyRequest() => http.Request(
+          'POST',
+          Uri.parse('https://dynamodb.us-east-1.amazonaws.com/'),
+        )
+          ..headers['X-Amz-Target'] = 'DynamoDB_20120810.GetItem'
+          ..body = '{"TableName":123,"Bucket":["x"]}';
+
+    Map<String, Object?> onlySub() {
+      final json = jsonDecode(jsonEncode(sender.segments.single.toJson()))
+          as Map<String, Object?>;
+      return (json['subsegments'] as List).single as Map<String, Object?>;
+    }
+
+    test('non-string resource fields: 200 returned, names omitted', () async {
+      final client = XRayBaseClient(
+        MockClient((_) async => http.Response('{}', 200)),
+        tracer,
+      );
+
+      late http.StreamedResponse res;
+      await tracer.run(tracer.beginSegment(), () async {
+        res = await client.send(badBodyRequest());
+        await res.stream.drain<void>();
+      });
+
+      expect(res.statusCode, 200);
+      final sub = onlySub();
+      final aws = sub['aws'] as Map;
+      expect(aws['operation'], 'GetItem');
+      expect(aws.containsKey('table_name'), isFalse);
+      expect(aws.containsKey('bucket_name'), isFalse);
+      expect(sub['fault'], isNot(true));
+    });
+
+    test('transport error is rethrown identical, not a TypeError', () async {
+      final boom = const SocketException('connection refused');
+      final client = XRayBaseClient(
+        MockClient((_) async => throw boom),
+        tracer,
+      );
+
+      Object? caught;
+      await tracer.run(tracer.beginSegment(), () async {
+        try {
+          await client.send(badBodyRequest());
+        } catch (e) {
+          caught = e;
+        }
+      });
+
+      expect(caught, same(boom));
+      final sub = onlySub();
+      expect(sub['fault'], isTrue);
+      final aws = sub['aws'] as Map;
+      expect(aws.containsKey('table_name'), isFalse);
+      expect(aws.containsKey('bucket_name'), isFalse);
+    });
+    for (final status in [200, 500]) {
+      test('non-UTF-8 S3 PUT body keeps http status ($status)', () async {
+        final client = XRayBaseClient(
+          MockClient((_) async => http.Response('', status)),
+          tracer,
+        );
+        final req = http.Request(
+          'PUT',
+          Uri.parse('https://my-bucket.s3.us-east-1.amazonaws.com/key.bin'),
+        )..bodyBytes = [0xff, 0xfe, 0x00, 0xc3];
+
+        late http.StreamedResponse res;
+        await tracer.run(tracer.beginSegment(), () async {
+          res = await client.send(req);
+          await res.stream.drain<void>();
+        });
+
+        expect(res.statusCode, status);
+        final sub = onlySub();
+        expect(
+            (sub['http'] as Map)['response'], containsPair('status', status));
+        expect(sub['fault'], status == 500 ? isTrue : isNot(true));
+      });
+    }
   });
 
   // Reproduces the real double-tracing scenario: XRay.patchHttp() is active AND

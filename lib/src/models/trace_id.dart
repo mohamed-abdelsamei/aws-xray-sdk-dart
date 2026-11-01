@@ -1,4 +1,5 @@
 import '../utils.dart' show randomHex;
+import 'trace_header.dart' show isValidTraceId;
 
 /// X-Ray trace ID in the format `1-{8-hex-epoch-s}-{24-hex-random}`.
 final class TraceId {
@@ -19,10 +20,7 @@ final class TraceId {
   static TraceId? tryParse(String value) {
     final root = _extractField(value, 'Root');
     if (root == null) return null;
-    final parts = root.split('-');
-    if (parts.length != 3 || parts[0] != '1') return null;
-    if (parts[1].length != 8 || parts[2].length != 24) return null;
-    return TraceId._(root);
+    return isValidTraceId(root) ? TraceId._(root) : null;
   }
 
   /// The validated `Root` trace ID from an `X-Amzn-Trace-Id` header, as a
@@ -39,6 +37,9 @@ final class TraceId {
       tryParse(headerValue)?.toString();
 
   /// The parent segment ID embedded in an `X-Amzn-Trace-Id` header, if any.
+  ///
+  /// Returns the raw, unvalidated value: it is not checked to be 16 hex chars,
+  /// nor that the header's `Root` is valid.
   static String? parseParentId(String headerValue) =>
       _extractField(headerValue, 'Parent');
 
