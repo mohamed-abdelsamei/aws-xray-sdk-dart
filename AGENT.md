@@ -103,7 +103,7 @@ scripts/
   workflows/
     ci.yml                   # push/PR to main: format + analyze + test (stable + beta)
     commitlint.yml           # PR: Conventional Commit title check
-    tag-release.yml          # "Release" button: bump version, tag vX.Y.Z, dispatch publish
+    tag-release.yml          # "Release" button: release PR for the bump, then tag vX.Y.Z + dispatch publish
     publish.yml              # tag v*.*.*: test -> GitHub Release -> pub publish (OIDC)
 ```
 
@@ -292,11 +292,14 @@ parent workspace (one level up from this package, not tracked in the SDK repo).
   unreleased pubspec version is used as-is; an already-tagged one is
   auto-incremented by the chosen bump level (patch default) and written back.
   Generates a `## X.Y.Z` CHANGELOG section from commit subjects when none is
-  hand-written, commits any pubspec/CHANGELOG change as
-  `chore(release): X.Y.Z`, pushes `vX.Y.Z`, then dispatches `publish.yml` on
-  that tag (the `workflow_dispatch` API is exempt from the GITHUB_TOKEN
-  no-recursive-triggers rule, and running on the tag ref is what pub.dev's
-  OIDC exchange requires).
+  hand-written. If pubspec/CHANGELOG changed, it commits them as
+  `chore(release): X.Y.Z` on a `release/vX.Y.Z` branch through the GraphQL
+  `createCommitOnBranch` API (so GitHub signs the commit), opens a PR, and
+  stops. Once that PR is merged, a second run finds nothing to change, pushes
+  `vX.Y.Z`, and dispatches `publish.yml` on that tag (the `workflow_dispatch`
+  API is exempt from the GITHUB_TOKEN no-recursive-triggers rule, and running
+  on the tag ref is what pub.dev's OIDC exchange requires). CI does not run on
+  the release PR, because GITHUB_TOKEN-made events trigger no workflows.
 - **Publish** (`publish.yml`): runs on a `v*.*.*` tag (push or
   `workflow_dispatch` on the tag). Jobs run in order `test` (stable + beta) ->
   `github-release` (verify tag matches `pubspec.yaml`, create the Release from
@@ -304,13 +307,20 @@ parent workspace (one level up from this package, not tracked in the SDK repo).
   `dart-lang/setup-dart/.github/workflows/publish.yml@v1`, via OIDC, no stored
   token). Requires pub.dev automated publishing enabled for the repo with tag
   pattern `v{{version}}`.
+- **Branch protection** (repository rulesets, no bypass actors): "Signed
+  commits" requires verified signatures on every branch; "Protect main" requires
+  a pull request (0 approvals) and blocks force-push and deletion on `main`.
+  Nobody, including the owner and the Release workflow, pushes to `main`
+  directly. Personal-account repos cannot give the GitHub Actions app a bypass,
+  which is why the Release workflow goes through a PR.
 
 **To release:** Actions -> **Release** -> Run workflow, picking the bump
-level (patch/minor/major). Everything — version bump, CHANGELOG section, tag,
-GitHub Release, pub.dev publish — runs automatically from there. For curated
+level (patch/minor/major). It opens a `chore(release): X.Y.Z` PR; merge it
+(squash or merge commit), then run **Release** again. The second run tags,
+creates the GitHub Release and publishes to pub.dev. For curated
 release notes or a pre-release version (e.g. `0.5.0-beta.1`), bump
 `pubspec.yaml` and/or write the `## X.Y.Z` section by hand, merge to `main`
-first, and the workflow uses them as-is.
+first, and the workflow uses them as-is and tags on the first run.
 
 CLI fallback: `git tag -a vX.Y.Z -m "Release X.Y.Z" && git push origin vX.Y.Z`
 — a locally pushed tag triggers `publish.yml` directly. To retry a failed
